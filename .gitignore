@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Manifest output
+manifests/
+*.parquet
+
+# Airflow
+airflow_logs/
+.env
+nohup.out
+
+# Airflow auth state
+airflow_auth/

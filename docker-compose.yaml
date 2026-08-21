@@ -1,0 +1,118 @@
+x-airflow-env: &airflow-env
+  # we run as the host UID (not the image's airflow user), so HOME must be set
+  # explicitly or python misses /home/airflow/.local and can't import airflow
+  HOME: /home/airflow
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  # workers (forked by the scheduler, in its own container) call back to this
+  # URL to fetch task workloads; the default is localhost:8080, which is dead
+  # inside the scheduler container since api-server runs separately
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+  # airflow 3 defaults to SimpleAuthManager: users come from config, and the
+  # password file is seeded by airflow-init so it survives container recreation
+  AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${_AIRFLOW_WWW_USER_USERNAME}:admin"
+  AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/auth/passwords.json
+  AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+  # must be identical across services, or a task worker's token (signed by the
+  # scheduler) fails verification on the api-server ("Invalid auth token")
+  AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET}
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres/airflow
+  AIRFLOW_CONN_GREEK_CC_DB: postgresql://greek_cc_app:${GREEK_CC_DB_PASSWORD}@postgres/greek_cc
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+
+x-airflow-common: &airflow-common
+  # only airflow-init declares `build` — sharing it across every service makes
+  # compose build the same tag concurrently and the targets collide
+  image: greek-cc-airflow:3.3.1
+  user: "${AIRFLOW_UID}:0"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./manifests:/opt/airflow/manifests
+    - ./airflow_logs:/opt/airflow/logs
+    - ./airflow_auth:/opt/airflow/auth
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: airflow
+      GREEK_CC_DB_PASSWORD: ${GREEK_CC_DB_PASSWORD}
+    # exposed so a GUI client (DBeaver) can reach it from another machine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD}
+    # keep the image's own entrypoint: it registers an /etc/passwd entry for our
+    # host UID, without which airflow's getuser() call blows up
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate
+        python -c "
+        import json, os
+        path = os.environ['AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE']
+        json.dump({os.environ['_AIRFLOW_WWW_USER_USERNAME']: os.environ['_AIRFLOW_WWW_USER_PASSWORD']}, open(path, 'w'))
+        print('seeded', path)
+        "
+        python -c "
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+        from greek_cc import db
+        db.ensure_schema(PostgresHook(postgres_conn_id='greek_cc_db').get_conn())
+        "
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    environment: *airflow-env
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 10s
+      retries: 10
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    environment: *airflow-env
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    environment: *airflow-env
+    command: dag-processor
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
