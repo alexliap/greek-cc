@@ -32,8 +32,10 @@ def _conn():
 
 with DAG(
     dag_id="greek_cc_manifest",
-    # one run = one part-file fetch, so this interval *is* the request rate
-    schedule="0 * * * *",
+    # one run = one part-file fetch, so this interval *is* the request rate.
+    # a timedelta (not a cron string) so the spacing is a true fixed 40min,
+    # not the uneven :00/:40 alternation a "*/40 * * * *" cron would give
+    schedule=timedelta(minutes=20),
     catchup=False,
     max_active_runs=1,
     params={
@@ -44,7 +46,11 @@ with DAG(
     tags=["greek-cc"],
 ) as dag:
 
-    @task(retries=2, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=10))
+    @task(
+        retries=2,
+        retry_delay=timedelta(minutes=2),
+        execution_timeout=timedelta(minutes=10),
+    )
     def claim_work() -> list[dict]:
         """Take a batch of pending parts, seeding the next crawl if the queue is empty.
 

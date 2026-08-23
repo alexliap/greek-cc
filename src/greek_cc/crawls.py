@@ -1,7 +1,7 @@
 """The 27 target Common Crawl snapshots, oldest to newest.
 
 CC-MAIN-2024-22 through CC-MAIN-2026-30 — picks up where FineWeb-2's
-`ell_Grek` (2013 -> April 2024) leaves off. See plan_of_action.md §3.
+`ell_Grek` (2013 -> April 2024) leaves off.
 """
 
 CRAWLS = [

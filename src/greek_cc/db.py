@@ -49,6 +49,21 @@ CREATE TABLE IF NOT EXISTS part_status (
 
 CREATE INDEX IF NOT EXISTS ix_part_status_crawl_status ON part_status (crawl_id, status);
 CREATE INDEX IF NOT EXISTS ix_part_status_queue ON part_status (status, crawl_id, part_index);
+
+CREATE TABLE IF NOT EXISTS extract_status (
+    crawl_id      TEXT PRIMARY KEY REFERENCES crawl_status(crawl_id) ON DELETE CASCADE,
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','running','done','failed')),
+    sample_size   INTEGER,
+    row_count_in  BIGINT,
+    row_count_out BIGINT,
+    output_path   TEXT,
+    last_error    TEXT,
+    started_at    TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -248,5 +263,64 @@ def mark_crawl_failed(
             WHERE crawl_id = %s
             """,
             (error, success_parts, failed_parts, min_success_ratio, crawl_id),
+        )
+    conn.commit()
+
+
+def claim_ready_crawl_for_extraction(conn) -> dict | None:
+    """Atomically claim the oldest finished crawl not yet extracted (or retry-eligible).
+
+    A crawl qualifies once its manifest is done and it either has no
+    extract_status row yet, or its previous extraction attempt failed. Same
+    FOR UPDATE SKIP LOCKED pattern as claim_next_parts, so two concurrent
+    callers can't claim the same crawl. Returns None when nothing qualifies.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO extract_status (crawl_id, status, started_at, updated_at)
+            SELECT c.crawl_id, 'running', now(), now()
+            FROM crawl_status c
+            LEFT JOIN extract_status e ON e.crawl_id = c.crawl_id
+            WHERE c.status = 'done' AND (e.crawl_id IS NULL OR e.status = 'failed')
+            ORDER BY c.crawl_id
+            LIMIT 1
+            FOR UPDATE OF c SKIP LOCKED
+            ON CONFLICT (crawl_id) DO UPDATE
+            SET status = 'running', last_error = NULL, started_at = now(), updated_at = now()
+            RETURNING crawl_id
+            """
+        )
+        row = cur.fetchone()
+    conn.commit()
+
+    return {"crawl_id": row[0]} if row else None
+
+
+def mark_extraction_done(
+    conn, crawl_id: str, output_path: str, row_count_in: int, row_count_out: int
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE extract_status
+            SET status = 'done', output_path = %s, row_count_in = %s, row_count_out = %s,
+                last_error = NULL, finished_at = now(), updated_at = now()
+            WHERE crawl_id = %s
+            """,
+            (output_path, row_count_in, row_count_out, crawl_id),
+        )
+    conn.commit()
+
+
+def mark_extraction_failed(conn, crawl_id: str, error: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE extract_status
+            SET status = 'failed', last_error = %s, finished_at = now(), updated_at = now()
+            WHERE crawl_id = %s
+            """,
+            (error, crawl_id),
         )
     conn.commit()
