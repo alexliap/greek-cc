@@ -14,20 +14,32 @@ Docs dropped by each filter aren't written anywhere (no exclusion_writer) --
 §5.5's `_removed` sibling config is deliberately skipped to avoid extra
 Parquet clutter.
 
-Runs a crawl's *entire* manifest (tens of millions of rows once a crawl
-finishes merging) in one pass -- see dags/greek_cc_extract_dag.py's
-execution_timeout, which is set long accordingly.
+Split into two stages because a full crawl's manifest is tens of millions of
+rows, and `CCIndexGreekReader` materializes whatever slice it's given as
+Python dicts up front (warc_reader.py) -- pointing that at an entire manifest
+at once OOM-crashed the Pi twice. Stage 1 runs everything up to (but not
+including) the per-crawl MinHash dedup over one bounded manifest chunk at a
+time -- most rows get dropped by these filters, so each chunk's survivors are
+a small Parquet file under out_dir/_stage_1/{crawl}/chunk_{offset}/. Stage 2
+runs once all chunks are done: reads every chunk's survivors back in (small
+enough to buffer, unlike the raw manifest), runs the online MinHash dedup
+(which needs a whole-crawl view to catch cross-chunk near-duplicates and, by
+design, buffers its full input -- see dedup.py), and writes the final output
+to out_dir/{crawl}/, same location/shape as before this split.
 """
 
 import logging
 import os
+import shutil
 from functools import partial
 from pathlib import Path
 
 import polars as pl
+import pyarrow as pa
 import yaml
 from datatrove.executor.local import LocalPipelineExecutor
 from datatrove.pipeline.extractors import Trafilatura
+from datatrove.pipeline.extractors.base import ExtractorSandbox
 from datatrove.pipeline.filters import (
     FineWebQualityFilter,
     GopherQualityFilter,
@@ -41,6 +53,7 @@ from datatrove.pipeline.formatters import (
     PIIFormatter,
     SymbolLinesFormatter,
 )
+from datatrove.pipeline.readers.parquet import ParquetReader
 from datatrove.pipeline.writers.parquet import ParquetWriter
 
 from greek_cc.dedup import OnlineMinhashDedup
@@ -48,8 +61,40 @@ from greek_cc.warc_reader import CCIndexGreekReader
 
 logger = logging.getLogger(__name__)
 
+# ExtractorSandbox._worker (Trafilatura's per-doc timeout subprocess) tries to
+# raise its own oom_score_adj to 1000 on startup so the OOM killer prefers it
+# over the main process - but that needs CAP_SYS_RESOURCE, which Docker does
+# not grant by default. Without this patch the worker dies with a
+# PermissionError before ever extracting anything, on every single document:
+# the parent sees that as a timeout, respawns a fresh worker for the next doc,
+# and the crash-loop leaks a Process+Pipe each time until the container hits
+# its file-descriptor limit. This is a best-effort OOM hint, safe to skip.
+ExtractorSandbox.set_oom_score_adj = lambda self, score: None
+
 LANGUAGE = "ell_Grek"
 CONFIG_PATH = Path(__file__).parent / "configs" / "ell_Grek.yml"
+
+# Explicit schema for Stage 1's writer. LanguageFilter(keep_top_pairs_threshold=0.01)
+# adds a *variable* number of top_language_{lang}_score metadata keys per doc
+# (whichever languages exceed the threshold for that specific doc) -- without
+# a fixed schema, ParquetWriter infers one per write-batch, so chunk files
+# can end up with mismatched schemas that pl.scan_parquet can't read across.
+# This also just drops those keys, which nothing downstream needs.
+STAGE_1_SCHEMA = pa.schema(
+    [
+        ("id", pa.string()),
+        ("text", pa.string()),
+        ("crawl", pa.string()),
+        ("content_digest", pa.string()),
+        ("url", pa.string()),
+        ("url_host_registered_domain", pa.string()),
+        ("warc_filename", pa.string()),
+        ("warc_record_offset", pa.int64()),
+        ("language", pa.string()),
+        ("language_score", pa.float64()),
+        ("language_script", pa.string()),
+    ]
+)
 
 
 def _load_filter_config() -> dict:
@@ -67,20 +112,47 @@ def _above_language_threshold(doc, threshold: float) -> bool:
     )
 
 
-def run_extraction_pipeline(
+def _stage_1_chunk_dir(stage_1_dir: Path, crawl: str, offset: int) -> Path:
+    return Path(stage_1_dir) / "_stage_1" / crawl / f"chunk_{offset:012d}"
+
+
+def compute_chunk_bounds(manifest_path: Path, chunk_size: int) -> list[dict]:
+    """Split a manifest's row range into bounded (offset, length) chunks.
+
+    A metadata-only read (row count from the Parquet footer), not a
+    materialization -- safe to call regardless of manifest size.
+    """
+    total_rows = pl.scan_parquet(manifest_path).select(pl.len()).collect().item()
+    return [
+        {"offset": offset, "length": min(chunk_size, total_rows - offset)}
+        for offset in range(0, total_rows, chunk_size)
+    ]
+
+
+def run_extraction_stage_1_chunk(
     crawl: str,
     manifest_path: Path,
-    out_dir: Path,
-    publish: bool = False,
+    stage_1_dir: Path,
+    offset: int,
+    length: int,
 ) -> dict:
+    """Run the filter chain (reader through formatters) over one manifest chunk.
+
+    Idempotent/resumable for free: LocalPipelineExecutor skips re-running a
+    chunk whose logging_dir already has a completions marker from a prior
+    successful run, and ParquetWriter opens in "wb" mode, so a chunk killed
+    mid-write is cleanly overwritten by the next attempt.
+    """
     cfg = _load_filter_config()
-    crawl_out = Path(out_dir) / crawl
-    row_count_in = pl.scan_parquet(manifest_path).select(pl.len()).collect().item()
+    chunk_out = _stage_1_chunk_dir(stage_1_dir, crawl, offset)
 
     pipeline = [
-        CCIndexGreekReader(crawl, manifest_path),
+        CCIndexGreekReader(crawl, manifest_path, offset=offset, limit=length),
         URLFilter(),
-        Trafilatura(favour_precision=True),
+        # default timeout is 1s/doc -- too tight for the Pi's CPU combined with
+        # favour_precision's slower parsing, dropping plenty of legitimately
+        # extractable pages as spurious timeouts
+        Trafilatura(favour_precision=True, timeout=10),
         LanguageFilter(
             backend="glotlid", label_only=True, keep_top_pairs_threshold=0.01
         ),
@@ -120,6 +192,42 @@ def run_extraction_pipeline(
         FTFYFormatter(),
         PIIFormatter(),
         SymbolLinesFormatter(symbols_to_remove=["|"], replace_char="\n"),
+        ParquetWriter(
+            str(chunk_out),
+            compression="zstd",
+            expand_metadata=True,
+            schema=STAGE_1_SCHEMA,
+        ),
+    ]
+
+    executor = LocalPipelineExecutor(
+        pipeline=pipeline, tasks=1, logging_dir=str(chunk_out / "logs")
+    )
+    executor.run()
+
+    survivor_files = list(chunk_out.glob("*.parquet"))
+    row_count_survivors = (
+        pl.scan_parquet(survivor_files).select(pl.len()).collect().item()
+        if survivor_files
+        else 0
+    )
+    return {"chunk_out": str(chunk_out), "row_count_survivors": row_count_survivors}
+
+
+def run_extraction_stage_2_dedup_and_write(
+    crawl: str,
+    manifest_path: Path,
+    stage_1_dir: Path,
+    out_dir: Path,
+    publish: bool = False,
+) -> dict:
+    """Merge every chunk's survivors, dedup once across the whole crawl, write final output."""
+    row_count_in = pl.scan_parquet(manifest_path).select(pl.len()).collect().item()
+    stage_1_crawl_dir = Path(stage_1_dir) / "_stage_1" / crawl
+    crawl_out = Path(out_dir) / crawl
+
+    pipeline = [
+        ParquetReader(str(stage_1_crawl_dir), glob_pattern="chunk_*/*.parquet"),
         OnlineMinhashDedup(language=LANGUAGE),
         ParquetWriter(str(crawl_out), compression="zstd", expand_metadata=True),
     ]
@@ -140,6 +248,11 @@ def run_extraction_pipeline(
         _publish(crawl_out, crawl)
     elif publish:
         logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
+
+    # only delete Stage 1's intermediate survivors once the final write above
+    # is confirmed -- if this stage itself fails/crashes, a retry can still
+    # read them back in without redoing every chunk
+    shutil.rmtree(stage_1_crawl_dir, ignore_errors=True)
 
     return {
         "output_path": str(crawl_out),

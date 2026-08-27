@@ -319,6 +319,18 @@ WET files are pre-extracted plain text and only ~8–9 TiB/crawl, which sounds a
 
 ### 5.1 What is and isn't achievable
 
+> **Update, post-implementation:** this section's "never persist documents"
+> goal held for small/sample runs but broke in production. Pointing the
+> extraction pipeline at a full crawl's manifest (`CC-MAIN-2024-22`,
+> 18.3M rows) OOM-crashed the Pi twice, because the reader materialized the
+> *entire* manifest slice as Python dicts before any filtering began. The
+> fix — a deliberate, justified departure from "no intermediate state" — runs
+> the filter chain per bounded manifest chunk, writing each chunk's small
+> surviving-doc set to disk, then runs the per-crawl MinHash dedup once over
+> the merged survivors (small enough to buffer, unlike the raw manifest) and
+> deletes the intermediate files once that succeeds. See
+> `src/greek_cc/extract.py`'s module docstring for the current design.
+
 Let me be straight about this, because it's the part where a plan can quietly lie to you.
 
 - **Everything single-document is trivially streamable.** Extraction, language ID, all the quality heuristics, PII scrubbing — these are pure functions of one document. Zero intermediate state, genuinely.

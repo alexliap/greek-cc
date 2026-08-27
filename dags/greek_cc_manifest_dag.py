@@ -39,7 +39,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     params={
-        "min_success_ratio": Param(0.98, type="number", minimum=0.0, maximum=1.0),
+        "min_success_ratio": Param(1.0, type="number", minimum=0.0, maximum=1.0),
         # how many parts one run fetches concurrently via dynamic task mapping
         "batch_size": Param(1, type="integer", minimum=1, maximum=50),
     },

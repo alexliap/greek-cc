@@ -13,10 +13,10 @@ wheels/
 manifests/
 *.parquet
 
-# Airflow
-airflow_logs/
+# Secrets (AWS creds for standalone local scripts; the Airflow
+# deployment and its own secrets live in ../airflow/)
 .env
 nohup.out
 
-# Airflow auth state
-airflow_auth/
+# Database backups
+backups/

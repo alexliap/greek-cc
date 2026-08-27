@@ -7,8 +7,8 @@ and stays testable without an Airflow runtime.
 `part_status` doubles as the work queue: one DAG run claims one pending part,
 which is what paces fetching against Common Crawl's rate limit.
 
-Page-row data never lands here — only bookkeeping. The manifests themselves are
-Parquet on disk (plan_of_action.md §5.6), referenced by path from these rows.
+Page-row data never lands here, only bookkeeping. The manifests themselves are
+Parquet on disk, referenced by path from these rows.
 """
 
 SCHEMA = """
