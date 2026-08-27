@@ -1,0 +1,3 @@
+.env
+airflow_logs/
+airflow_auth/
