@@ -1,0 +1,7 @@
+# The build context is now the repo root, which holds 3.7GB of manifests, a
+# virtualenv and DB backups -- none of which the image needs. Deny everything,
+# then allow back exactly the three paths docker/Dockerfile COPYs.
+*
+!pyproject.toml
+!README.md
+!src/

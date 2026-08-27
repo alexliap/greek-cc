@@ -13,10 +13,29 @@ dynamically mapped once per chunk (mirrors greek_cc_manifest_dag's
 claim_work -> fetch.expand -> merge_if_complete shape) and runs everything up
 to the per-crawl dedup, so a chunk's failure/timeout only costs that chunk,
 not the whole crawl; stage_2_finalize runs once, after every chunk is done,
-merging survivors, deduping, and writing the final output. Chunks run
-sequentially (max_active_tis_per_dag=1) -- parallel chunks would multiply
-peak memory on the same Pi that already OOM'd, for no throughput win since
-extraction is CPU-bound, not I/O-bound.
+merging survivors, deduping, and writing the final output.
+
+Chunks run sequentially (max_active_tis_per_dag=1, paired with tasks=1 in
+extract.py). This was a memory guard, not a throughput judgement: parallel
+chunks would have multiplied peak memory on the same Pi that already OOM'd,
+and on 4 cores already saturated by one chunk there was nothing to win.
+
+Both halves of that have since changed, so do NOT read the setting as a
+general rule:
+
+  * The memory constraint is gone. WarcReader now bounds its read-ahead with
+    a sliding window (warc_reader.py), capping peak memory per chunk at
+    max_in_flight documents no matter how large the chunk is. Previously
+    ThreadPoolExecutor.map() submitted every row at once and buffered the
+    lot -- which is what drove the Pi into memory pressure hard enough to
+    take the whole machine down.
+  * "No throughput win" was true of the Pi's 4 cores, and is false on a
+    bigger host. Extraction is CPU-bound, so on a 10-12 core Mac the win from
+    raising these is close to linear -- it is the single change that takes
+    this from months to about a week.
+
+So: keep 1 on the Pi, raise both on the Mac, gradually, watching memory.
+See docs/running-on-macos.md, "What actually determines completion time".
 
 max_active_runs=1 keeps a later 3-day tick from starting a second run on top
 of one still going. Most runs are expected to skip: today no crawl has

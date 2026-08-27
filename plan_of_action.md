@@ -6,6 +6,29 @@
 
 ---
 
+> ## ⚠️ Read this before trusting anything below
+>
+> **This is the pre-implementation design doc, not a description of the running
+> system.** It was written before any of it was built, and parts of it were
+> superseded by what the build actually found. It is kept because §§1–5 are
+> still the authoritative reasoning for *why* the pipeline is shaped the way it
+> is — the columnar-index trick, the filter recipe, per-snapshot dedup, Parquet
+> at every boundary. Those held up.
+>
+> **§§6 and 9 did not.** Section-by-section status as of 27 Aug 2026:
+>
+> | Section | Status | What actually shipped |
+> |---|---|---|
+> | §1–§5 | **Still accurate** | Implemented as described, in `src/greek_cc/`. |
+> | §6.1 (Pi throughput) | ❌ **Wrong by ~100×** | Estimated ~100 docs/s and ~28 h/crawl. Measured floor is **49.3 docs/min ≈ 0.8 docs/s**. See the note in §6.1. |
+> | §6.3 (scheduling) | ❌ **Superseded** | No systemd timer, no `state.sqlite`. It's **Airflow 3 + Postgres**; see `docker-compose.yaml` and `dags/`. |
+> | §9 (sequence) | ⚠️ **Partly overtaken** | Phases 1–4 are done in substance but not in the order or the form given. Phase 5's "~2 days / $170" assumed AWS; it is running on the Pi and Mac instead. |
+>
+> For how it actually runs today, read [`CLAUDE.md`](CLAUDE.md), then
+> [`README.md`](README.md) and [`docs/running-on-macos.md`](docs/running-on-macos.md).
+
+---
+
 ## Contents
 
 - [1. The one idea that makes this tractable](#1-the-one-idea-that-makes-this-tractable)
@@ -501,6 +524,25 @@ Leave `use_content_defined_chunking=True` (the default) alone — it's Xet-frien
 
 ### 6.1 Can the Raspberry Pi do it?
 
+> ❌ **The estimates in this subsection were measured wrong by about 100×.**
+> The table below budgets `~10 M docs @ ~100 docs/s` ⇒ ~28 h of extraction per
+> crawl. The Pi's actual measured floor is **49.3 docs/min ≈ 0.8 docs/s**,
+> putting one 100k-row chunk at **≤33.8 h** and a full crawl (184 chunks for
+> CC-MAIN-2024-22, 18.3 M rows) at roughly **8 months**, not 2 days.
+>
+> Two caveats on that measurement, both stated so nobody over-trusts it either:
+> it counts only documents Trafilatura *rejected* (`discarding data` log lines;
+> successes aren't logged), so it is a **lower bound** and 33.8 h/chunk is a
+> ceiling rather than a reading. And it was taken with `tasks=1`, i.e. pinned to
+> a single core. Even allowing 3× for both, the conclusion stands: months, not
+> days.
+>
+> The `~100 docs/s` figure appears to have assumed all four cores plus a much
+> cheaper extractor. What actually dominates is `Trafilatura(favour_precision=True)`
+> at up to its 10 s/doc timeout on an A76. **This is the number that forced
+> extraction onto the Mac** — see `docs/running-on-macos.md`. The verdict text
+> below ("comfortably", "~2 days per crawl") should be read as void.
+
 **Per crawl, on a Pi 5 (4× Cortex-A76 @ 2.4 GHz, 8–16 GB):**
 
 | Stage | Estimate |
@@ -539,6 +581,32 @@ Make it interruption-safe: checkpoint at WARC-file granularity, keep all state i
 **Alternative: Hetzner dedicated** (e.g. AX52, 16 threads, ~€50/mo, 1 Gbit/s unmetered). ~1 crawl/day via `data.commoncrawl.org`, so ~1 month and ~€50 for the backfill. Cheaper in absolute terms, but you're pulling tens of TB through CC's CDN instead of staying in-region, with the rate-limit risk that implies — and you'd want §4.4 Option B to keep the bandwidth down, which reintroduces persistent state. **I'd use AWS for the backfill and Hetzner or the Pi for steady state.**
 
 ### 6.3 Scheduling
+
+> ❌ **Superseded in full. None of this subsection was built.** There is no
+> systemd timer, no `state.sqlite`, and no `pending → indexing → fetching → done`
+> state machine.
+>
+> What shipped instead is **Airflow 3 (LocalExecutor) + Postgres**, in Docker
+> Compose:
+>
+> - **`greek_cc_manifest`** (`dags/greek_cc_manifest_dag.py`) — polls for a new
+>   crawl, scans the columnar index, writes a Parquet manifest. Network-bound.
+> - **`greek_cc_extract`** (`dags/greek_cc_extract_dag.py`) — every 3 days,
+>   claims a crawl whose manifest is `done` and runs §5's pipeline over it in
+>   bounded row chunks. CPU-bound.
+>
+> The state machine survives in spirit, but it lives in Postgres, not SQLite:
+> `crawl_status` / `crawl_parts` / `extract_status`, defined in
+> `src/greek_cc/db.py`. The "claim it and start" idea below is real — it's
+> `claim_next_parts()` and `claim_ready_crawl_for_extraction()`, both
+> `SELECT ... FOR UPDATE SKIP LOCKED`. The lockfile is `max_active_runs=1`.
+>
+> The two DAGs have **no Airflow-level dependency** on each other; they
+> coordinate purely through `crawl_status.status='done'`. That is what lets them
+> run on different machines — see `docs/running-on-macos.md`.
+>
+> Read the rest of this subsection as design rationale that was re-homed, not as
+> instructions.
 
 **Steady state — Pi, systemd timer** (not cron; you get logging, `RuntimeMaxSec`, and restart semantics):
 
@@ -597,6 +665,23 @@ The honest reason not to do it: FineWeb-2 already covers that era competently, a
 ---
 
 ## 9. Proposed sequence
+
+> ⚠️ **Overtaken by events.** Phases 1–4 are substantially done, but not in this
+> order and not in this form — `state.sqlite` became Postgres, and the
+> "streaming executor" became Airflow-orchestrated chunking (`plan_chunks` →
+> `stage_1_extract.expand` → `stage_2_finalize`) because pointing the reader at
+> a whole multi-million-row manifest OOM-crashed the Pi twice.
+>
+> Phase 5's "**~2 days machine, ~$170**" assumed an AWS spot backfill. That is
+> not what's happening: it runs on the Pi (manifests) and a Mac (extraction),
+> for €0 in compute and considerably more wall-clock. Phase 6's "systemd timer"
+> is void — see §6.3.
+>
+> The standing advice in the last paragraph — *"Do not skip Phase 1… every
+> number marked 'estimate' should be replaced with a measurement before you
+> commit to a multi-month plan"* — turned out to be the most valuable line in
+> this document, and was in fact skipped. §6.1's throughput estimate went
+> unmeasured until production, and it was wrong by ~100×.
 
 | Phase | What | Rough time |
 |---|---|---|
