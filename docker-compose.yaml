@@ -16,7 +16,10 @@ x-airflow-env: &airflow-env
   # must be identical across services, or a task worker's token (signed by the
   # scheduler) fails verification on the api-server ("Invalid auth token")
   AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET}
-  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@postgres/airflow
+  # POSTGRES_HOST defaults to the postgres service in this compose project.
+  # Set it in .env (alongside COMPOSE_FILE, see docs/running-on-macos.md) to
+  # point at a Postgres running on another machine instead.
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/airflow
   # LocalExecutor runs a project's CPU-bound work as a subprocess of this
   # scheduler container; on a small host that starves the scheduler's own
   # heartbeat past the 30s default, which makes it conclude it died and
@@ -26,7 +29,7 @@ x-airflow-env: &airflow-env
   AIRFLOW__SCHEDULER__SCHEDULER_HEALTH_CHECK_THRESHOLD: "300"
 
   # ---- project: greek-cc ----------------------------------------------------
-  AIRFLOW_CONN_GREEK_CC_DB: postgresql://greek_cc_app:${GREEK_CC_DB_PASSWORD}@postgres/greek_cc
+  AIRFLOW_CONN_GREEK_CC_DB: postgresql://greek_cc_app:${GREEK_CC_DB_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/greek_cc
   # NOTE: these are injected into every Airflow service, so any project's DAG
   # can read them. Once a second project lands here, scope these to greek-cc's
   # own tasks via an Airflow Connection instead of a blanket env var.
@@ -64,6 +67,10 @@ x-airflow-common: &airflow-common
 services:
   postgres:
     image: postgres:17-alpine
+    # Behind a profile so a machine that uses someone else's Postgres simply
+    # doesn't start one. Enabled via COMPOSE_PROFILES=local-db in .env, which
+    # keeps `docker compose up -d` identical on every machine.
+    profiles: ["local-db"]
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

@@ -18,6 +18,18 @@ than each running their own Airflow.
    own dependencies. Put slow steps (compiles, model downloads) *above* the
    `COPY src/` so editing source doesn't invalidate them.
 
+## Running across two machines
+
+One machine hosts Postgres; others connect to it. Which one this is comes
+entirely from `.env`, so `docker compose up -d` is the same command everywhere:
+
+- **Hosts Postgres:** `COMPOSE_PROFILES=local-db`
+- **Uses a remote Postgres:** set `COMPOSE_FILE` to chain
+  `docker-compose.remote-db.yaml`, plus `POSTGRES_HOST`
+
+Only one machine should run a scheduler against a given database. See
+[docs/running-on-macos.md](docs/running-on-macos.md).
+
 ## Notes
 
 - `postgres-db-volume` is pinned to the name `greek-cc_postgres-db-volume` for
