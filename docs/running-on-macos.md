@@ -1,109 +1,118 @@
-# Running extraction on a Mac, against the Pi
+# Splitting the pipeline: manifests on the Pi, extraction on a Mac
 
-The Pi stays the system of record: it keeps Postgres and the manifests. The Mac
-runs the Airflow services and does the CPU-heavy extraction. Nothing about the
-pipeline code changes; the whole difference lives in `.env`.
+The Pi keeps doing what it's good at — building manifests, which is rate-limited
+by Common Crawl rather than CPU — and hosts Postgres. The Mac takes the
+CPU-bound text extraction. No pipeline code changes; the difference is `.env`.
 
 ```
-   Pi  192.168.1.18                     Mac
-   ├── Postgres  :5432   <────────────  Airflow scheduler / apiserver /
-   └── manifests/        <────────────  dag-processor  (+ all extraction work)
-                (NFS or copy)
+  Pi  192.168.1.18                          Mac
+  ├── Postgres :5432                        Airflow #2  (metadata: airflow_mac)
+  │   ├── airflow      (Pi's Airflow)          └── greek_cc_extract
+  │   ├── airflow_mac  (Mac's Airflow)  <───────────┘
+  │   └── greek_cc     (SHARED app state) <─────────┘
+  ├── Airflow #1 (metadata: airflow)
+  │   └── greek_cc_manifest
+  └── manifests/  ──────────────────────>  read over NFS (or copied)
 ```
 
-## Why move at all
+## Why this shape
+
+The two DAGs have **no Airflow-level dependency** — no `ExternalTaskSensor`, no
+datasets. They coordinate entirely through the `greek_cc` application database:
+`greek_cc_manifest` marks `crawl_status.status='done'`, and
+`claim_ready_crawl_for_extraction` picks that up on the other side. That's what
+makes splitting them across machines clean.
+
+## The one thing that would break it
+
+**Do not point both machines at the same Airflow metadata database.** Airflow
+schedulers are homogeneous: any scheduler can run any DAG it can see. Sharing
+one metadata DB means the Pi could pick up extraction tasks and the Mac could
+pick up manifest tasks — exactly the opposite of the split. There is no way to
+pin a DAG to a machine with LocalExecutor.
+
+So each machine gets its own metadata database. Both can live on the Pi's
+Postgres server; they're just different databases. `airflow_mac` already exists.
+
+## Why move extraction at all
 
 Not stability — the crash causes (DNS flood, unbounded read-ahead, scheduler
 heartbeat starvation) are fixed and the Pi runs without crashing now. It's
-throughput. Measured floor on the Pi was **49.3 docs/min**, putting one 100k-row
-chunk at **≤33.8 hours**, across **184 chunks** for CC-MAIN-2024-22 (18.3M
-rows). That's months.
+throughput. Measured floor was **49.3 docs/min**, putting one 100k-row chunk at
+**≤33.8 hours**, across **184 chunks** for CC-MAIN-2024-22 (18.3M rows).
 
 49.3/min is a *lower bound*: it counts only documents Trafilatura rejected
 (`discarding data` log lines); successful extractions aren't logged. So
-33.8h/chunk is a ceiling, not a measurement. The order of magnitude is the
-point — even 3× faster is still ~150 days.
+33.8h/chunk is a ceiling, not a measurement. Even 3× faster is still ~150 days.
 
-## Architecture: no code changes
+Manifest building is unaffected by any of this — it's network-bound and the Pi
+handles it fine.
 
-The image is `linux/arm64`, which Apple Silicon runs **natively** — no
-emulation, no platform rebuild. (An Intel Mac builds `linux/amd64` instead;
-also fine, just a slower first build, still nothing to edit.)
-
-## Postgres stays on the Pi
-
-Already set up for this — `listen_addresses = '*'`, `host all all all
-scram-sha-256`, and port 5432 published. Verified reachable from another host
-on the LAN.
-
-On the Mac, `.env` selects the remote-database setup:
+## Mac `.env`
 
 ```ini
-# COMPOSE_PROFILES=local-db          <- commented out: no local Postgres here
+# COMPOSE_PROFILES=local-db          <- commented out: Postgres lives on the Pi
 COMPOSE_FILE=docker-compose.yaml:docker-compose.remote-db.yaml
 POSTGRES_HOST=192.168.1.18
 POSTGRES_PORT=5432
+AIRFLOW_DB_NAME=airflow_mac
+
+AIRFLOW_UID=501                      # id -u on macOS
 ```
 
-The `local-db` profile keeps the Mac from starting a Postgres it doesn't need,
-and `docker-compose.remote-db.yaml` clears `airflow-init`'s dependency on it.
-`docker compose up -d` then works unchanged on both machines.
+`POSTGRES_PASSWORD` and `GREEK_CC_DB_PASSWORD` must match the Pi's — same
+server. The other secrets (Fernet key, JWT secret, UI login) are per-Airflow
+instance and can differ, though copying them is simpler.
 
-Both password values (`POSTGRES_PASSWORD`, `GREEK_CC_DB_PASSWORD`) must match
-the Pi's, since it's the same database.
+The Pi's `.env` keeps `COMPOSE_PROFILES=local-db` and no `AIRFLOW_DB_NAME`,
+so it stays on the `airflow` database exactly as before.
 
-**Only one machine should run a scheduler against this database.** Airflow does
-support multiple schedulers, but nothing here is set up for it — so when the
-Mac takes over extraction, stop the Pi's Airflow services and leave only
-Postgres running:
+## Which DAG runs where
 
-```bash
-# on the Pi
-docker compose stop airflow-scheduler airflow-apiserver airflow-dag-processor
-```
+Both machines mount both DAG files, but pause state lives in each machine's own
+metadata database, so it's independent and sticks:
 
-### The tradeoff
+| | `greek_cc_manifest` | `greek_cc_extract` |
+|---|---|---|
+| **Pi** | unpaused | **paused** |
+| **Mac** | **paused** | unpaused |
 
-The scheduler talks to Postgres constantly, so the Mac's runs now depend on the
-Pi staying up and the network staying healthy. Two things soften this:
-`scheduler_health_check_threshold` is already raised to 300s, which absorbs long
-stalls, and Postgres connections are retried. But a Pi reboot mid-run will still
-disrupt the Mac's tasks.
+Set it once on each machine after first start. Since the metadata DBs are
+separate, neither can override the other.
 
-Also note the connection is unencrypted, so the DB password crosses your LAN in
-the clear. Fine on a trusted home network; worth revisiting otherwise.
+## Manifests: NFS from the Pi
 
-## Manifests: share or copy
+The Pi writes them, the Mac reads them. This is cheap: the manifest is 188 row
+groups of ~98k rows, and `scan_parquet(...).slice()` reads only the footer plus
+the row groups a chunk needs — about **6 MB over the wire per chunk** (16 MB
+uncompressed), against a chunk that takes hours of CPU.
 
-The manifest is 188 row groups of ~98k rows, and `scan_parquet(...).slice()`
-reads only the footer plus the row groups a chunk needs. So a 100k-row chunk
-pulls **~6 MB over the wire** (16 MB uncompressed) — against a chunk that takes
-hours of CPU, that's nothing. Sharing over the network is entirely practical.
+**The catch is writes.** `EXTRACTIONS_DIR` is
+`/opt/airflow/manifests/extractions` — *inside* the manifests tree — and it's
+where stage 1 writes chunk output, stage 2 reads it back, and the final output
+lands. Mounting `manifests/` over NFS naively would put all of that on the
+network. A stalled NFS mount blocks in uninterruptible I/O, which is far worse
+to recover from than a failed HTTP request.
 
-**The catch is writes, not reads.** `EXTRACTIONS_DIR` is
-`/opt/airflow/manifests/extractions`, i.e. *inside* the manifests tree. Naively
-mounting `manifests/` over NFS would put stage 1's chunk output — and stage 2's
-reads of it — on the network too. A stalled NFS mount blocks in uninterruptible
-I/O, which is worse to recover from than a failed HTTP request.
-
-Nested mounts avoid that, with no code change. In the Mac's compose, the second
-mount shadows the subdirectory:
+Nested mounts fix this with no code change — the second mount shadows the
+subdirectory, so only manifest *reads* cross the network:
 
 ```yaml
-    - /Volumes/pi-manifests:/opt/airflow/manifests        # NFS from Pi (input)
-    - ./extractions:/opt/airflow/manifests/extractions    # local disk (output)
+    # in the Mac's docker-compose override
+    - /Volumes/pi-manifests:/opt/airflow/manifests        # NFS, input only
+    - ./extractions:/opt/airflow/manifests/extractions    # local disk, all output
 ```
 
-**Or just copy it once.** `manifests/CC-MAIN-2024-22.parquet` is 1.2 GB — a few
-minutes over the LAN, then zero ongoing network dependency. Simplest, and worth
-preferring unless you want the Pi to keep building manifests for new crawls
-(which it's well suited to: manifest building is rate-limited by Common Crawl,
-not CPU-bound).
+Export from the Pi read-only (`/etc/exports`), since the Mac never needs to
+write there.
 
-## What else to copy
+**Simpler alternative:** copy `CC-MAIN-2024-22.parquet` (1.2 GB) once and skip
+NFS entirely. You'd re-copy when the Pi finishes a new crawl, but there's no
+ongoing network dependency. Reasonable if new crawls are rare.
 
-Both repos must sit **as siblings** — the compose file references `../greek-cc`
-for DAGs, manifests, and the Postgres init script:
+## Repos and secrets
+
+Both repos must sit **as siblings** — the compose file references `../greek-cc`:
 
 ```
 projects/
@@ -111,32 +120,22 @@ projects/
   greek-cc/
 ```
 
-| What | How | Notes |
-|---|---|---|
-| `airflow/`, `greek-cc/` | git clone | |
-| `airflow/.env` | copy by hand | **gitignored**; then edit as above |
-| `greek-cc/.env` | copy by hand | **gitignored**; AWS creds for standalone scripts |
-| manifests | NFS or copy | see above |
+`airflow/.env` and `greek-cc/.env` are gitignored, so they need copying by hand.
 
-## Mac-specific settings
-
-**`AIRFLOW_UID`** — it's `1000` (Linux); macOS is typically `501`:
-
-```bash
-sed -i '' "s/^AIRFLOW_UID=.*/AIRFLOW_UID=$(id -u)/" .env
-```
+## Other Mac settings
 
 **Docker Desktop resources** — Settings → Resources: at least **8 GB RAM**, and
-**as many CPUs as you can spare**; CPU is the bottleneck.
+as many CPUs as you can spare; CPU is the bottleneck.
 
-**Enable VirtioFS** — Settings → General. Markedly faster than gRPC-FUSE for
-bind mounts.
+**Enable VirtioFS** — Settings → General. Much faster than gRPC-FUSE.
 
-**Port 8080** must be free. (5432 doesn't need to be, since no local Postgres.)
+**Port 8080** must be free. 5432 doesn't need to be — no local Postgres.
 
 **The `dns:` setting is harmless.** It exists because the Pi's systemd-resolved
-stub collapsed under concurrent S3 fetches; macOS has no systemd-resolved, so
-it's simply unnecessary there.
+stub collapsed under concurrent S3 fetches; macOS has no systemd-resolved.
+
+**Platform:** the image is `linux/arm64`, which Apple Silicon runs natively — no
+emulation, no rebuild. (Intel Macs build `linux/amd64`; also fine.)
 
 ## Running it
 
@@ -146,27 +145,42 @@ docker compose build airflow-init     # ~15 min first time (fasttext + 1.57GB mo
 docker compose up -d
 ```
 
-UI at http://localhost:8080. Unpause `greek_cc_extract` to start.
+`airflow-init` runs `airflow db migrate` against `airflow_mac` (creating its
+schema) and `ensure_schema()` against the shared `greek_cc` database — the
+latter is idempotent (`CREATE TABLE IF NOT EXISTS` throughout), so running it
+from both machines is safe.
+
+UI at http://localhost:8080. Pause `greek_cc_manifest`, unpause
+`greek_cc_extract`.
 
 Rebuilds after editing `greek-cc/src/` take **~8 seconds** — the Dockerfile puts
 the slow steps above `COPY src/` deliberately.
 
-## The thing that actually determines completion time
+## Caveats worth knowing
 
-Everything above gets it *running*. But the pipeline is still pinned to **one
+**The Mac depends on the Pi being up.** The scheduler talks to Postgres
+constantly. `scheduler_health_check_threshold` is already raised to 300s, which
+absorbs stalls, but a Pi reboot mid-run will disrupt the Mac's tasks.
+
+**The DB password crosses the LAN unencrypted.** Fine on a trusted home network;
+worth revisiting otherwise.
+
+## What actually determines completion time
+
+Everything above gets it *running*. But extraction is still pinned to **one
 core**:
 
 - `LocalPipelineExecutor(..., tasks=1)` — `greek-cc/src/greek_cc/extract.py`
 - `max_active_tis_per_dag=1` — `greek-cc/dags/greek_cc_extract_dag.py`
 
-Both were guards against the Pi running out of memory when a single chunk
-buffered its entire read-ahead. **That constraint is gone**: the reader now uses
-a bounded sliding window (`warc_reader.py`), so peak memory per chunk is capped
-at `max_in_flight` documents regardless of chunk size.
+Both were guards against the Pi running out of memory when one chunk buffered
+its entire read-ahead. **That constraint is gone**: the reader now uses a
+bounded sliding window (`warc_reader.py`), capping peak memory per chunk at
+`max_in_flight` documents regardless of chunk size.
 
 On a 10–12 core Mac, raising these is what turns "runs correctly" into "finishes
-this month". Extraction is CPU-bound, so the win is close to linear in cores;
-with faster per-core performance too, expect roughly **20–30×** — months down to
+this month" — extraction is CPU-bound, so the win is close to linear in cores.
+With faster per-core performance too, expect roughly **20–30×**: months down to
 about a week.
 
 That's a change to greek-cc, not to this deployment, and it's optional. Worth

@@ -27,8 +27,10 @@ entirely from `.env`, so `docker compose up -d` is the same command everywhere:
 - **Uses a remote Postgres:** set `COMPOSE_FILE` to chain
   `docker-compose.remote-db.yaml`, plus `POSTGRES_HOST`
 
-Only one machine should run a scheduler against a given database. See
-[docs/running-on-macos.md](docs/running-on-macos.md).
+Machines that each own a different DAG need their **own metadata database**
+(`AIRFLOW_DB_NAME`) — any scheduler can run any DAG it can see, so sharing one
+means they steal each other's tasks. They can still share the Postgres server,
+and share application state. See [docs/running-on-macos.md](docs/running-on-macos.md).
 
 ## Notes
 

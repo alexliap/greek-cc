@@ -19,7 +19,13 @@ x-airflow-env: &airflow-env
   # POSTGRES_HOST defaults to the postgres service in this compose project.
   # Set it in .env (alongside COMPOSE_FILE, see docs/running-on-macos.md) to
   # point at a Postgres running on another machine instead.
-  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/airflow
+  # AIRFLOW_DB_NAME gives each machine its own Airflow metadata database, even
+  # when they share one Postgres server. Airflow's schedulers are homogeneous --
+  # any scheduler sharing a metadata DB can run any DAG in it -- so two machines
+  # that are each meant to own a specific DAG must not share one. They still
+  # share the greek_cc application database below, which is what actually
+  # coordinates them.
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${AIRFLOW_DB_NAME:-airflow}
   # LocalExecutor runs a project's CPU-bound work as a subprocess of this
   # scheduler container; on a small host that starves the scheduler's own
   # heartbeat past the 30s default, which makes it conclude it died and
