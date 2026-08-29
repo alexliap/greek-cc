@@ -32,7 +32,7 @@ on a Mac).
 
 Two databases on one Postgres server, and the distinction matters:
 
-- **`greek_cc`** — application state. `crawl_status`, `crawl_parts`,
+- **`greek_cc`** — application state. `crawl_status`, `part_status`,
   `extract_status`. Schema in `src/greek_cc/db.py`. **Shared** across machines.
 - **`airflow`** (and `airflow_mac`) — Airflow's own metadata. **Never shared**
   between machines; see the warning in `docs/running-on-macos.md`.
@@ -96,7 +96,7 @@ docker exec greek-cc-postgres-1 psql -U airflow -d greek_cc \
 
 # manifest part queue for a crawl in flight
 docker exec greek-cc-postgres-1 psql -U airflow -d greek_cc \
-  -c "select status, count(*) from crawl_parts group by status"
+  -c "select status, count(*) from part_status group by status"
 ```
 
 Extraction throughput is not logged directly. Successful extractions produce no
