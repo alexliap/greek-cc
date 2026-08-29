@@ -96,16 +96,75 @@ network. A stalled NFS mount blocks in uninterruptible I/O, which is far worse
 to recover from than a failed HTTP request.
 
 Nested mounts fix this with no code change — the second mount shadows the
-subdirectory, so only manifest *reads* cross the network:
+subdirectory, so only manifest *reads* cross the network. **Don't mount the
+NFS share on the macOS host** (`mount_nfs` into `/Volumes/...` or anywhere
+else) — on macOS the `mount` syscall requires root even for a directory the
+calling user owns, so this either fails outright (`Operation not permitted`)
+or forces you to hand your Mac's sudo password to whatever is running the
+mount. Use a **Docker-managed NFS volume** instead: the mount happens inside
+Docker Desktop's own Linux VM, which needs no macOS-level privilege at all.
+`docker-compose.mac-manifests.yaml` implements this:
 
 ```yaml
-    # in the Mac's docker-compose override
-    - /Volumes/pi-manifests:/opt/airflow/manifests        # NFS, input only
-    - ./extractions:/opt/airflow/manifests/extractions    # local disk, all output
+volumes:
+  pi-manifests:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=192.168.1.18,ro,vers=3,nolock
+      device: ":/home/<user>/.../greek-cc/manifests"    # path to the clone on the Pi
+
+# then, per airflow-* service, overriding (not appending to) the base volumes list:
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - pi-manifests:/opt/airflow/manifests               # NFS, input only
+      - ./extractions:/opt/airflow/manifests/extractions  # local disk, all output
+      - ./airflow_logs:/opt/airflow/logs
+      - ./airflow_auth:/opt/airflow/auth
 ```
 
-Export from the Pi read-only (`/etc/exports`), since the Mac never needs to
-write there.
+Overriding per-service `volumes:` (rather than adding to it) needs the
+Compose-spec `!override` YAML tag, since plain lists get merged by mount
+target across compose files, not replaced — and a duplicate target for
+`/opt/airflow/manifests` (the base file's plain bind mount *and* this one)
+fails at container creation. A tag can't be reapplied to an alias
+(`!override *foo` doesn't parse), so it's attached where the anchor is
+defined and carried by every alias to it:
+
+```yaml
+x-mac-manifests-volumes: &mac-manifests-volumes !override
+  - ./dags:/opt/airflow/dags
+  - pi-manifests:/opt/airflow/manifests
+  - ./extractions:/opt/airflow/manifests/extractions
+  - ./airflow_logs:/opt/airflow/logs
+  - ./airflow_auth:/opt/airflow/auth
+
+services:
+  airflow-init:
+    volumes: *mac-manifests-volumes
+  # ...same for airflow-apiserver, airflow-scheduler, airflow-dag-processor
+```
+
+Add `docker-compose.mac-manifests.yaml` to the Mac's `COMPOSE_FILE` chain in
+`.env`, after `docker-compose.remote-db.yaml`.
+
+Export from the Pi read-only, and with `insecure` in `/etc/exports` — Docker
+Desktop's Linux VM doesn't originate the NFS mount from a privileged
+(<1024) source port, and the default `secure` export option rejects that
+with `permission denied` at `docker volume create`/first use, not at
+`exportfs` time:
+
+```
+# /etc/exports on the Pi
+/home/<user>/.../greek-cc/manifests <mac-lan-ip>(ro,sync,no_subtree_check,root_squash,insecure)
+```
+
+then `sudo exportfs -ra` and `sudo systemctl enable --now nfs-kernel-server`
+(installing `nfs-kernel-server` if it isn't already).
+
+Sanity-check the volume before trusting Airflow to use it —
+`docker run --rm -v pi-manifests:/mnt alpine ls -la /mnt` should list the
+crawl `.parquet` files without hanging or erroring.
 
 **Simpler alternative:** copy `CC-MAIN-2024-22.parquet` (1.2 GB) once and skip
 NFS entirely. You'd re-copy when the Pi finishes a new crawl, but there's no

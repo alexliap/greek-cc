@@ -201,7 +201,29 @@ def run_extraction_stage_1_chunk(
     ]
 
     executor = LocalPipelineExecutor(
-        pipeline=pipeline, tasks=1, logging_dir=str(chunk_out / "logs")
+        pipeline=pipeline,
+        # tasks>1 makes datatrove fork a worker process per task (each loading
+        # its own copy of the ~1.57GB GlotLID model plus pipeline state). Tried
+        # tasks=2 on this Mac's Docker Desktop VM (7.65GB total) and it pushed
+        # the scheduler container to 5.7GB/7.65GB, starving the apiserver of
+        # CPU long enough that in-flight task heartbeat JWTs expired waiting to
+        # be validated -- the apiserver logged 50-80s request latencies and
+        # jwt.exceptions.ExpiredSignatureError, and the resulting 403 reset the
+        # running chunk. Needs more Docker Desktop RAM/CPU before raising this
+        # again (see docs/running-on-macos.md).
+        tasks=1,
+        # tasks>1 also needs start_method="fork" (not datatrove's default
+        # "forkserver"): forkserver re-execs the airflow task entrypoint script
+        # in each worker to rebuild picklable state, which re-triggers
+        # airflow.settings.initialize() -> configure_orm() inside that worker
+        # and fails to (re-)parse AIRFLOW__DATABASE__SQL_ALCHEMY_CONN, crashing
+        # the worker before it does any real work (sqlalchemy.exc.ArgumentError:
+        # Could not parse SQLAlchemy URL). "fork" clones this already-initialized
+        # process directly instead, skipping that broken re-import. Harmless at
+        # tasks=1 (no pool is spawned either way) -- kept so raising tasks again
+        # later doesn't reintroduce this crash.
+        start_method="fork",
+        logging_dir=str(chunk_out / "logs"),
     )
     executor.run()
 

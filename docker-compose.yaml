@@ -33,6 +33,18 @@ x-airflow-env: &airflow-env
   # that task's progress and restarting it, not because anything was wrong.
   # Raised well past the heartbeat gaps observed in practice (up to ~77s).
   AIRFLOW__SCHEDULER__SCHEDULER_HEALTH_CHECK_THRESHOLD: "300"
+  # A second, separate starvation path: in Airflow 3 each running task has its
+  # own supervisor subprocess that heartbeats to the *API server* (not
+  # Postgres) to prove that task is alive -- unrelated to the scheduler
+  # heartbeat above, and not covered by raising it. The same CPU-bound,
+  # single-threaded extraction work (tasks=1 in extract.py) starved this
+  # heartbeat too: chunk 0 of CC-MAIN-2024-22 hit 3 failed heartbeats after a
+  # burst of slow lxml/Trafilatura parses and was SIGKILLed mid-chunk with no
+  # traceback, wasting ~14 minutes of real work for a task that wasn't stuck.
+  # Scaled to the same 300s tolerance as the scheduler threshold above, since
+  # that value is already proven against this pipeline's worst-case stalls.
+  AIRFLOW__WORKERS__MIN_HEARTBEAT_INTERVAL: "5"
+  AIRFLOW__WORKERS__MAX_FAILED_HEARTBEATS: "60"
 
   AIRFLOW_CONN_GREEK_CC_DB: postgresql://greek_cc_app:${GREEK_CC_DB_PASSWORD}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/greek_cc
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}

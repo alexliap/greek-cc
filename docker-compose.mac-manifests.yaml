@@ -1,0 +1,40 @@
+# Overlay for a machine that reads manifests over the network instead of
+# building them locally (the Mac, per docs/running-on-macos.md). `pi-manifests`
+# is a Docker-managed volume backed by NFS -- the mount happens inside Docker
+# Desktop's Linux VM, so it needs no host-level `mount_nfs`/sudo on macOS.
+#
+# Nested mounts keep only manifest *reads* on the network: pi-manifests lands
+# on /opt/airflow/manifests (read-only), then a local bind mount shadows the
+# extractions/ subtree so stage 1/2 output and the final Parquet stay on local
+# disk -- EXTRACTIONS_DIR never crosses the network. A stalled NFS mount
+# blocks in uninterruptible I/O, which is far worse to recover from than a
+# failed HTTP request, so this split matters.
+#
+# Point device at wherever the Pi's clone of this repo puts manifests/.
+volumes:
+  pi-manifests:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=192.168.1.18,ro,vers=3,nolock
+      device: ":/home/alexliap/Desktop/projects/greek-cc/manifests"
+
+# The tag lives on the anchor itself -- a tag can't be re-applied to an
+# alias (`!override *foo` doesn't parse), but an alias does carry the tag
+# its anchor was defined with.
+x-mac-manifests-volumes: &mac-manifests-volumes !override
+  - ./dags:/opt/airflow/dags
+  - pi-manifests:/opt/airflow/manifests
+  - ./extractions:/opt/airflow/manifests/extractions
+  - ./airflow_logs:/opt/airflow/logs
+  - ./airflow_auth:/opt/airflow/auth
+
+services:
+  airflow-init:
+    volumes: *mac-manifests-volumes
+  airflow-apiserver:
+    volumes: *mac-manifests-volumes
+  airflow-scheduler:
+    volumes: *mac-manifests-volumes
+  airflow-dag-processor:
+    volumes: *mac-manifests-volumes

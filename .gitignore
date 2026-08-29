@@ -22,6 +22,9 @@ nohup.out
 airflow_logs/
 airflow_auth/
 
+# Local extraction output on the Mac (see docker-compose.mac-manifests.yaml)
+/extractions/
+
 # Database backups
 backups/
 
