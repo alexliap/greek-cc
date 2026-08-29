@@ -6,6 +6,11 @@ crawl once its last part lands. Unlike the free HTTPS mirror, signed S3 access
 isn't throttled, so concurrency is a straightforward win here rather than
 something that needs to be rate-limited away. Seeding the queue is automatic,
 so once unpaused this works through every crawl in `CRAWLS` unattended.
+
+Once a crawl merges, its manifest is also uploaded to the HF Hub dataset repo
+named by HF_MANIFEST_REPO (see publish_manifest in index.py) -- gated on
+HF_TOKEN/HF_MANIFEST_REPO being set, so this is a no-op (with a warning) on a
+machine that hasn't configured them.
 """
 
 from datetime import timedelta
@@ -17,7 +22,12 @@ from airflow.sdk import DAG, Param, get_current_context, task
 
 from greek_cc import db
 from greek_cc.crawls import CRAWLS
-from greek_cc.index import fetch_part_manifest, merge_crawl_manifest, warc_parquet_urls
+from greek_cc.index import (
+    fetch_part_manifest,
+    merge_crawl_manifest,
+    publish_manifest,
+    warc_parquet_urls,
+)
 
 OUT_DIR = Path("/opt/airflow/manifests")
 
@@ -120,8 +130,13 @@ with DAG(
     # XCom from a mix of succeeded/failed mapped instances is its own headache and
     # the crawl id is all this task actually needs from upstream.
     @task(trigger_rule="all_done")
-    def merge_if_complete(parts: list[dict]) -> None:
-        """Merge the crawl once no part of it is outstanding."""
+    def merge_if_complete(parts: list[dict]) -> str:
+        """Merge the crawl once no part of it is outstanding.
+
+        Returns the crawl id so `publish` (downstream) knows what to upload --
+        skip/failure here propagates to it via the default all_success trigger
+        rule, so it only runs after an actual successful merge.
+        """
         if not parts:
             raise AirflowSkipException("no parts claimed this run")
         crawl = parts[0]["crawl_id"]
@@ -168,7 +183,14 @@ with DAG(
         finally:
             conn.close()
 
+        return crawl
+
+    @task(retries=2, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=15))
+    def publish(crawl: str) -> None:
+        publish_manifest(OUT_DIR / f"{crawl}.parquet")
+
     claimed = claim_work()
     fetched = fetch.expand(part=claimed)
     merged = merge_if_complete(claimed)
     fetched >> merged
+    publish(merged)

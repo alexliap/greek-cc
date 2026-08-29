@@ -121,3 +121,31 @@ def merge_crawl_manifest(crawl: str, fragment_paths: list[Path], out_dir: Path) 
         output_path,
     )
     return len(manifest)
+
+
+def publish_manifest(output_path: Path) -> None:
+    """Upload a merged crawl manifest to the HF Hub manifests repo.
+
+    Mirrors extract.py's _publish for the extraction output: same
+    HF_TOKEN/repo-env-var gated, warn-and-skip pattern, just a single file
+    instead of a directory of shards.
+    """
+    if not os.environ.get("HF_TOKEN"):
+        logger.warning("HF_TOKEN is not set -- skipping manifest upload")
+        return
+    repo_id = os.environ.get("HF_MANIFEST_REPO")
+    if not repo_id:
+        logger.warning("HF_TOKEN is set but HF_MANIFEST_REPO is not -- skipping upload")
+        return
+
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
+    api.upload_file(
+        path_or_fileobj=str(output_path),
+        path_in_repo=output_path.name,
+        repo_id=repo_id,
+        repo_type="dataset",
+    )
+    logger.info("uploaded %s -> hf://datasets/%s/%s", output_path, repo_id, output_path.name)

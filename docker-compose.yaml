@@ -50,6 +50,12 @@ x-airflow-env: &airflow-env
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
   AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
+  # optional -- HF Hub publish steps in index.py/extract.py warn and no-op when
+  # these are unset, so an empty default here is fine on a machine that hasn't
+  # configured them
+  HF_TOKEN: ${HF_TOKEN:-}
+  HF_MANIFEST_REPO: ${HF_MANIFEST_REPO:-}
+  HF_DATASET_REPO: ${HF_DATASET_REPO:-}
 
 x-airflow-common: &airflow-common
   # only airflow-init declares `build` — sharing it across every service makes
