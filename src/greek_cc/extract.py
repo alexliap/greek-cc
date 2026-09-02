@@ -135,6 +135,8 @@ def run_extraction_stage_1_chunk(
     stage_1_dir: Path,
     offset: int,
     length: int,
+    tasks: int = 1,
+    publish: bool = False,
 ) -> dict:
     """Run the filter chain (reader through formatters) over one manifest chunk.
 
@@ -197,6 +199,12 @@ def run_extraction_stage_1_chunk(
             compression="zstd",
             expand_metadata=True,
             schema=STAGE_1_SCHEMA,
+            # default (1000) meant a worker could go through its entire
+            # ~4-5k row shard without writing a single byte -- survivors are
+            # rare enough (aggressive Greek-language + quality filtering over
+            # mostly non-Greek Common Crawl) that batch_size=1000 gave no
+            # visibility into whether a run was progressing or stalled.
+            batch_size=100,
         ),
     ]
 
@@ -211,14 +219,23 @@ def run_extraction_stage_1_chunk(
         # jwt.exceptions.ExpiredSignatureError, and the resulting 403 reset the
         # running chunk. That was under Airflow/Docker Desktop specifically;
         # extraction no longer runs there (see CLAUDE.md's "Performance,
-        # honestly"), but raising this still needs watching memory/CPU.
-        tasks=1,
-        # tasks>1 needs an explicit start_method (datatrove's default is
-        # "forkserver"); "fork" is the simpler, faster choice once nothing
-        # about the parent process's state is fragile to inherit. Harmless at
-        # tasks=1 (no pool is spawned either way) -- kept so raising tasks
-        # later doesn't require picking this again from scratch.
-        start_method="fork",
+        # honestly"), but raising this still needs watching memory/CPU -- each
+        # worker loads its own ~1.57GB GlotLID copy. CCIndexGreekReader shards
+        # its rows across ranks (see warc_reader.py) so tasks>1 here actually
+        # splits the fetch/extract work instead of redoing it per worker.
+        tasks=tasks,
+        # "fork" (the simpler, faster choice) actually deadlocks here once
+        # tasks>1: the CLI touches polars (compute_chunk_bounds) before this
+        # executor ever runs, which lazily spins up polars' Rust-side Rayon
+        # thread pool in the parent -- fork() only carries the calling thread
+        # into each child, so that pool's worker threads don't exist there,
+        # and the reader's first pl.collect() (warc_reader.py) hangs forever
+        # waiting on threads that will never respond. "spawn" gives each task
+        # a genuinely fresh interpreter instead of a fork of a polars-tainted
+        # parent, sidestepping the corruption entirely. Confirmed via py-spy:
+        # every forked worker's stack was parked inside collect() at
+        # warc_reader.py's manifest-slice read, not anywhere near S3.
+        start_method="spawn",
         logging_dir=str(chunk_out / "logs"),
     )
     executor.run()
@@ -229,6 +246,16 @@ def run_extraction_stage_1_chunk(
         if survivor_files
         else 0
     )
+
+    if publish and os.environ.get("HF_TOKEN"):
+        # pre-dedup: OnlineMinhashDedup only runs in stage 2, across the whole
+        # crawl, so this chunk can still contain near-duplicates of survivors
+        # from other chunks -- kept under raw/ so it's never mistaken for the
+        # final crawl=<crawl>/ output stage 2 publishes later
+        _publish(chunk_out, f"raw/crawl={crawl}/chunk={offset:012d}")
+    elif publish:
+        logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
+
     return {"chunk_out": str(chunk_out), "row_count_survivors": row_count_survivors}
 
 
@@ -263,7 +290,7 @@ def run_extraction_stage_2_dedup_and_write(
     )
 
     if publish and os.environ.get("HF_TOKEN"):
-        _publish(crawl_out, crawl)
+        _publish(crawl_out, f"crawl={crawl}")
     elif publish:
         logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
 
@@ -279,7 +306,7 @@ def run_extraction_stage_2_dedup_and_write(
     }
 
 
-def _publish(crawl_out: Path, crawl: str) -> None:
+def _publish(local_dir: Path, repo_path_prefix: str) -> None:
     from huggingface_hub import HfApi
 
     repo_id = os.environ.get("HF_DATASET_REPO")
@@ -288,10 +315,11 @@ def _publish(crawl_out: Path, crawl: str) -> None:
         return
 
     api = HfApi()
-    for path in crawl_out.glob("*.parquet"):
+    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
+    for path in local_dir.glob("*.parquet"):
         api.upload_file(
             path_or_fileobj=str(path),
-            path_in_repo=f"crawl={crawl}/{path.name}",
+            path_in_repo=f"{repo_path_prefix}/{path.name}",
             repo_id=repo_id,
             repo_type="dataset",
         )

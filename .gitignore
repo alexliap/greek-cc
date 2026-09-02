@@ -31,3 +31,5 @@ backups/
 # stray env backups
 .env.*
 !.env.example
+
+extract.log

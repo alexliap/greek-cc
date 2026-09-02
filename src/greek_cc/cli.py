@@ -11,6 +11,7 @@ final output directory), not by extract_status.
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -38,6 +39,19 @@ def main() -> None:
         action="store_true",
         help="Reprocess even if this crawl's output already exists",
     )
+    parser.add_argument(
+        "--tasks",
+        type=int,
+        default=max(1, (os.cpu_count() or 1) - 2),
+        help=(
+            "Parallel worker processes for stage 1, and thus concurrent S3 "
+            "connections (default: cpu_count - 2, leaving headroom for the "
+            "OS). Each worker loads its own copy of the ~1.57GB GlotLID model "
+            "-- watch memory if you raise this on a constrained machine. "
+            "Stage 2 dedup always runs single-task: it needs a whole-crawl "
+            "view to catch cross-chunk near-duplicates."
+        ),
+    )
     args = parser.parse_args()
 
     crawl_out = args.out_dir / args.crawl
@@ -58,7 +72,8 @@ def main() -> None:
             args.crawl, i, len(chunks), chunk["offset"], chunk["length"],
         )
         extract.run_extraction_stage_1_chunk(
-            args.crawl, manifest_path, args.out_dir, chunk["offset"], chunk["length"]
+            args.crawl, manifest_path, args.out_dir, chunk["offset"], chunk["length"],
+            tasks=args.tasks, publish=True,
         )
 
     logger.info("%s: stage 2 dedup + finalize", args.crawl)
