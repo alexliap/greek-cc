@@ -25,7 +25,7 @@
 > | §9 (sequence) | ⚠️ **Partly overtaken** | Phases 1–4 are done in substance but not in the order or the form given. Phase 5's "~2 days / $170" assumed AWS; it is running on the Pi and Mac instead. |
 >
 > For how it actually runs today, read [`CLAUDE.md`](CLAUDE.md), then
-> [`README.md`](README.md) and [`docs/running-on-macos.md`](docs/running-on-macos.md).
+> [`README.md`](README.md).
 
 ---
 
@@ -540,7 +540,7 @@ Leave `use_content_defined_chunking=True` (the default) alone — it's Xet-frien
 > The `~100 docs/s` figure appears to have assumed all four cores plus a much
 > cheaper extractor. What actually dominates is `Trafilatura(favour_precision=True)`
 > at up to its 10 s/doc timeout on an A76. **This is the number that forced
-> extraction onto the Mac** — see `docs/running-on-macos.md`. The verdict text
+> extraction onto the Mac** — see `CLAUDE.md`'s "Performance, honestly". The verdict text
 > below ("comfortably", "~2 days per crawl") should be read as void.
 
 **Per crawl, on a Pi 5 (4× Cortex-A76 @ 2.4 GHz, 8–16 GB):**
@@ -602,8 +602,16 @@ Make it interruption-safe: checkpoint at WARC-file granularity, keep all state i
 > `SELECT ... FOR UPDATE SKIP LOCKED`. The lockfile is `max_active_runs=1`.
 >
 > The two DAGs have **no Airflow-level dependency** on each other; they
-> coordinate purely through `crawl_status.status='done'`. That is what lets them
-> run on different machines — see `docs/running-on-macos.md`.
+> coordinate purely through `crawl_status.status='done'`. That is what let them
+> run on different machines.
+>
+> **Further update:** `greek_cc_extract` was itself later pulled out of
+> Airflow entirely and replaced with a plain on-demand CLI
+> (`greek-cc-extract`, `src/greek_cc/cli.py`) that downloads a crawl's
+> manifest from HF Hub instead of claiming it via `crawl_status`/
+> `extract_status` in Postgres. `claim_ready_crawl_for_extraction()` and the
+> `extract_status` table no longer exist. Only `greek_cc_manifest` still runs
+> under Airflow. See `CLAUDE.md`'s "Shape of the thing" for current state.
 >
 > Read the rest of this subsection as design rationale that was re-homed, not as
 > instructions.

@@ -1,57 +1,55 @@
 # greek-cc — orientation for agents
 
 Building a FineWeb-style Greek text dataset out of Common Crawl, on a Raspberry
-Pi 5 and a Mac. Airflow 3 (LocalExecutor) + Postgres, in Docker Compose.
+Pi 5 and a Mac. The Pi runs Airflow 3 (LocalExecutor) + Postgres in Docker
+Compose for manifest building; extraction runs as a plain CLI, anywhere.
 
 ## Read these first, in this order
 
-1. **`README.md`** — what the two DAGs are and how to run the stack.
-2. **The DAG docstrings** — `dags/greek_cc_manifest_dag.py` and
-   `dags/greek_cc_extract_dag.py`. These are the real architecture docs; they
-   explain the task graph and, more importantly, *why* it is shaped that way.
-3. **`docs/running-on-macos.md`** — the two-machine split, and the throughput
-   analysis that motivated it.
-4. **`plan_of_action.md`** — the pre-implementation design doc. §§1–5 are still
+1. **`README.md`** — what the manifest DAG and the extraction CLI are and how
+   to run each.
+2. **`dags/greek_cc_manifest_dag.py`'s docstring** and **`src/greek_cc/cli.py`'s
+   module docstring**. These are the real architecture docs; they explain the
+   task graph / pipeline flow and, more importantly, *why* each is shaped that
+   way.
+3. **`plan_of_action.md`** — the pre-implementation design doc. §§1–5 are still
    authoritative for *why* the pipeline works the way it does. **§§6 and 9 are
    superseded** and carry warning banners; do not plan against them.
 
 ## Shape of the thing
 
 ```
-greek_cc_manifest  ──> crawl_status.status = 'done' ──> greek_cc_extract
-   (network-bound)         (Postgres: greek_cc)          (CPU-bound)
-   scans the columnar                                     range-fetches WARC
-   index, writes a                                        records, Trafilatura,
-   Parquet manifest                                       filters, MinHash dedup
+greek_cc_manifest (Airflow DAG)         greek-cc-extract (CLI, on demand)
+   (network-bound)                          (CPU-bound)
+   scans the columnar index,                downloads a crawl's manifest,
+   writes a Parquet manifest,               range-fetches WARC records,
+   uploads it to HF Hub          ──HF Hub──>   Trafilatura, filters,
+   (alexliap/greek-cc-manifests)            MinHash dedup
 ```
 
-The two DAGs have **no Airflow-level dependency** — no sensor, no dataset. They
-coordinate only through the `greek_cc` application database. That is deliberate:
-it is what lets them run on different machines (manifests on the Pi, extraction
-on a Mac).
+Only `greek_cc_manifest` runs under Airflow. Extraction is a plain local
+command (`src/greek_cc/cli.py`, installed as `greek-cc-extract`) — no
+Airflow, no Docker, no Postgres. The two coordinate only by manifests
+landing on HF Hub, not through any database or Airflow-level dependency
+(no sensor, no dataset). That is deliberate: it is what lets extraction run
+anywhere (a Mac, say) with nothing but this repo's Python environment.
 
-Two databases on one Postgres server, and the distinction matters:
-
-- **`greek_cc`** — application state. `crawl_status`, `part_status`,
-  `extract_status`. Schema in `src/greek_cc/db.py`. **Shared** across machines.
-- **`airflow`** (and `airflow_mac`) — Airflow's own metadata. **Never shared**
-  between machines; see the warning in `docs/running-on-macos.md`.
-
-Paths inside the containers: manifests at `/opt/airflow/manifests/<crawl>.parquet`,
-all extraction output under `/opt/airflow/manifests/extractions/`.
+- **`greek_cc`** (Postgres) — application state for the manifest side only:
+  `crawl_status`, `part_status`. Schema in `src/greek_cc/db.py`.
+- **`airflow`** — Airflow's own metadata, for the one machine running
+  `greek_cc_manifest` (the Pi).
+Manifests land at `manifests/<crawl>.parquet` (inside the Airflow container
+for the manifest DAG; in the extraction machine's working directory for the
+CLI). Extraction output lands under `extractions/`.
 
 ## Traps
 
-**Resetting `extract_status` to `'pending'` makes a crawl unclaimable.**
-`claim_ready_crawl_for_extraction` matches only:
-
-```sql
-WHERE c.status = 'done' AND (e.crawl_id IS NULL OR e.status = 'failed')
-```
-
-`'pending'` is in neither branch. The DAG then skips silently, forever, with no
-error anywhere. To retry a crawl, set `status='failed'` (or delete the row).
-This cost a full run once.
+**The CLI skips a crawl whose output already exists — pass `--force` to redo.**
+`greek-cc-extract <crawl>` checks `extractions/<crawl>/*.parquet` first and
+exits immediately if it's already there. Re-running with `--force` reprocesses
+every chunk from scratch, not just the final dedup step: stage 2 deletes
+stage 1's per-chunk intermediates once it succeeds, so there's nothing partial
+to resume from at that point.
 
 **The comments in `docker-compose.yaml` and `docker/Dockerfile` are load-bearing.**
 Each one records a production failure that took the Pi down. Removing the setting
@@ -85,19 +83,25 @@ docker compose logs -f airflow-scheduler
 
 UI at http://localhost:8080 (credentials in `.env`).
 
-Progress:
+Progress (manifest side — Postgres):
 
 ```bash
 # where each crawl stands
 docker exec greek-cc-postgres-1 psql -U airflow -d greek_cc \
   -c "select crawl_id, status, updated_at from crawl_status order by crawl_id"
-docker exec greek-cc-postgres-1 psql -U airflow -d greek_cc \
-  -c "select crawl_id, status, last_error from extract_status"
 
 # manifest part queue for a crawl in flight
 docker exec greek-cc-postgres-1 psql -U airflow -d greek_cc \
   -c "select status, count(*) from part_status group by status"
 ```
+
+(`extract_status` still exists in that database from before extraction moved
+off Airflow/Postgres — it's orphaned, nothing writes to it anymore, don't
+trust it for current state.)
+
+Extraction progress is now just what's on disk on whichever machine is running
+`greek-cc-extract`: `extractions/_stage_1/<crawl>/chunk_*/` for in-flight
+chunks, `extractions/<crawl>/*.parquet` once a crawl is fully done.
 
 Extraction throughput is not logged directly. Successful extractions produce no
 log line; only rejects do (`discarding data`). Counting those gives a **lower
@@ -109,12 +113,11 @@ Measured floor on the Pi: **49.3 docs/min**, i.e. one 100k-row chunk in ≤33.8 
 184 chunks per crawl ⇒ roughly **8 months**. `plan_of_action.md` §6.1 estimated
 ~100 docs/s and was wrong by about 100×; the banner there explains why.
 
-Extraction is pinned to one core by `tasks=1` (`src/greek_cc/extract.py`) and
-`max_active_tis_per_dag=1` (`dags/greek_cc_extract_dag.py`). Both were memory
-guards, and the constraint they guarded against is gone — `warc_reader.py` now
-bounds read-ahead with a sliding window. Raising them on a multi-core Mac is the
-single change that takes this from months to about a week. Keep them at 1 on the
-Pi.
+Extraction is pinned to one core by `tasks=1` in `src/greek_cc/extract.py`.
+That was a memory guard, and the constraint it guarded against is gone —
+`warc_reader.py` now bounds read-ahead with a sliding window. Raising it on a
+multi-core machine is the single change that takes this from months to about
+a week.
 
 ## Conventions
 
