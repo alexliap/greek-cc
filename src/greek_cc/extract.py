@@ -252,8 +252,8 @@ def run_extraction_stage_1_chunk(
         # pre-dedup: OnlineMinhashDedup only runs in stage 2, across the whole
         # crawl, so this chunk can still contain near-duplicates of survivors
         # from other chunks -- kept under raw/ so it's never mistaken for the
-        # final crawl=<crawl>/ output stage 2 publishes later
-        _publish(chunk_out, f"raw/crawl={crawl}/chunk={offset:012d}")
+        # final <crawl>/ output stage 2 publishes later
+        _publish(chunk_out, f"raw/{crawl}/chunk={offset:012d}")
     elif publish:
         logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
 
@@ -291,7 +291,7 @@ def run_extraction_stage_2_dedup_and_write(
     )
 
     if publish and os.environ.get("HF_TOKEN"):
-        _publish(crawl_out, f"crawl={crawl}")
+        _publish(crawl_out, crawl)
     elif publish:
         logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
 

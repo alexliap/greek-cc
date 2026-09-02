@@ -102,12 +102,15 @@ chunks, `extractions/<crawl>/*.parquet` once a crawl is fully done.
 When `HF_TOKEN`/`HF_DATASET_REPO` are set, both stages also publish to that
 repo as they go, gated the same way as the manifest side (warn-and-skip if
 unset): each stage-1 chunk's survivors upload to
-`raw/crawl=<crawl>/chunk=<offset>/` right after that chunk finishes (see
+`raw/<crawl>/chunk=<offset>/` right after that chunk finishes (see
 `extract.py`'s `_publish` call in `run_extraction_stage_1_chunk`) — these are
 *pre-dedup*, since `OnlineMinhashDedup` only runs in stage 2, so they can
 still contain cross-chunk near-duplicates. The final deduped output uploads
-to `crawl=<crawl>/` once stage 2 finishes. `_publish` creates the repo
+to `<crawl>/` once stage 2 finishes. `_publish` creates the repo
 `private=True` if it doesn't already exist — never flip that without asking.
+(Chunks 1-2 of CC-MAIN-2024-22 were published by hand before this naming
+landed, under the old `raw/crawl=<crawl>/chunk=<offset>/` prefix -- everything
+from chunk 3 on uses the current one, so that repo has both prefixes for now.)
 
 Extraction throughput is not logged directly. Successful extractions produce no
 log line; only rejects do (`discarding data`). Counting those gives a **lower
