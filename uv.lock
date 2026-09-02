@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -1073,6 +1073,7 @@ dependencies = [
     { name = "polars" },
     { name = "pyahocorasick" },
     { name = "pyarrow" },
+    { name = "python-dotenv" },
     { name = "python-magic" },
     { name = "spacy" },
     { name = "tldextract" },
@@ -1101,6 +1102,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.43.2" },
     { name = "pyahocorasick", specifier = ">=2.3.1" },
     { name = "pyarrow", specifier = ">=25.0.1" },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "python-magic", specifier = ">=0.4.27" },
     { name = "spacy", specifier = ">=3.8.15" },
     { name = "tldextract", specifier = ">=5.3.2" },

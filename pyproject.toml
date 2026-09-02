@@ -16,6 +16,7 @@ dependencies = [
     "polars>=1.43.2",
     "pyahocorasick>=2.3.1",
     "pyarrow>=25.0.1",
+    "python-dotenv>=1.0.1",
     "python-magic>=0.4.27",
     "spacy>=3.8.15",
     "tldextract>=5.3.2",
@@ -24,6 +25,9 @@ dependencies = [
     "warcio>=1.8.1",
     "xxhash<4",
 ]
+
+[project.scripts]
+greek-cc-extract = "greek_cc.cli:main"
 
 [build-system]
 requires = ["hatchling"]

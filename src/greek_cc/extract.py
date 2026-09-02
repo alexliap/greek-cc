@@ -209,19 +209,15 @@ def run_extraction_stage_1_chunk(
         # CPU long enough that in-flight task heartbeat JWTs expired waiting to
         # be validated -- the apiserver logged 50-80s request latencies and
         # jwt.exceptions.ExpiredSignatureError, and the resulting 403 reset the
-        # running chunk. Needs more Docker Desktop RAM/CPU before raising this
-        # again (see docs/running-on-macos.md).
+        # running chunk. That was under Airflow/Docker Desktop specifically;
+        # extraction no longer runs there (see CLAUDE.md's "Performance,
+        # honestly"), but raising this still needs watching memory/CPU.
         tasks=1,
-        # tasks>1 also needs start_method="fork" (not datatrove's default
-        # "forkserver"): forkserver re-execs the airflow task entrypoint script
-        # in each worker to rebuild picklable state, which re-triggers
-        # airflow.settings.initialize() -> configure_orm() inside that worker
-        # and fails to (re-)parse AIRFLOW__DATABASE__SQL_ALCHEMY_CONN, crashing
-        # the worker before it does any real work (sqlalchemy.exc.ArgumentError:
-        # Could not parse SQLAlchemy URL). "fork" clones this already-initialized
-        # process directly instead, skipping that broken re-import. Harmless at
-        # tasks=1 (no pool is spawned either way) -- kept so raising tasks again
-        # later doesn't reintroduce this crash.
+        # tasks>1 needs an explicit start_method (datatrove's default is
+        # "forkserver"); "fork" is the simpler, faster choice once nothing
+        # about the parent process's state is fragile to inherit. Harmless at
+        # tasks=1 (no pool is spawned either way) -- kept so raising tasks
+        # later doesn't require picking this again from scratch.
         start_method="fork",
         logging_dir=str(chunk_out / "logs"),
     )

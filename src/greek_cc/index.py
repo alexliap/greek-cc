@@ -19,6 +19,7 @@ import urllib.request
 from pathlib import Path
 
 import polars as pl
+from huggingface_hub import hf_hub_download
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,9 @@ def fetch_part_manifest(
     started = time.monotonic()
 
     manifest = (
-        pl.scan_parquet(part_url, hive_partitioning=False, storage_options=_s3_storage_options())
+        pl.scan_parquet(
+            part_url, hive_partitioning=False, storage_options=_s3_storage_options()
+        )
         .filter(
             (pl.col("fetch_status") == 200)
             # exact match on a comma-separated ISO-639-3 list, not a substring test
@@ -88,7 +91,11 @@ def fetch_part_manifest(
 
     scan_seconds = time.monotonic() - started
     logger.info(
-        "%s part %d: scanned in %.1fs, %d matching rows", crawl, part_index, scan_seconds, len(manifest)
+        "%s part %d: scanned in %.1fs, %d matching rows",
+        crawl,
+        part_index,
+        scan_seconds,
+        len(manifest),
     )
 
     dest_dir = fragments_dir(crawl, out_dir)
@@ -96,7 +103,9 @@ def fetch_part_manifest(
     fragment_path = dest_dir / f"part-{part_index:05d}.parquet"
     manifest.write_parquet(fragment_path, compression="zstd")
 
-    logger.info("%s part %d: %d rows -> %s", crawl, part_index, len(manifest), fragment_path)
+    logger.info(
+        "%s part %d: %d rows -> %s", crawl, part_index, len(manifest), fragment_path
+    )
     return fragment_path, len(manifest)
 
 
@@ -148,4 +157,28 @@ def publish_manifest(output_path: Path) -> None:
         repo_id=repo_id,
         repo_type="dataset",
     )
-    logger.info("uploaded %s -> hf://datasets/%s/%s", output_path, repo_id, output_path.name)
+    logger.info(
+        "uploaded %s -> hf://datasets/%s/%s", output_path, repo_id, output_path.name
+    )
+
+
+def download_manifest(crawl: str, out_dir: Path) -> Path:
+    """Download a crawl's merged manifest from the HF Hub manifests repo.
+
+    Unlike publish_manifest, this does not warn-and-skip on missing config --
+    a manifest is a hard prerequisite for extraction, so a misconfigured or
+    missing HF_MANIFEST_REPO/file should fail loudly.
+    """
+    repo_id = os.environ.get("HF_MANIFEST_REPO")
+    if not repo_id:
+        raise RuntimeError("HF_MANIFEST_REPO is not set -- cannot download manifest")
+
+    path = hf_hub_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        filename=f"{crawl}.parquet",
+        local_dir=out_dir,
+        token=os.environ.get("HF_TOKEN"),
+    )
+    logger.info("downloaded hf://datasets/%s/%s.parquet -> %s", repo_id, crawl, path)
+    return Path(path)
