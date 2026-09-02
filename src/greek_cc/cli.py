@@ -6,7 +6,7 @@ stage-1/stage-2 pipeline extract.py has always run -- just driven by a plain
 loop instead of Airflow's dynamic task mapping, and triggered by hand instead
 of a schedule/claim. No Postgres involved: progress is tracked by what
 already exists on disk (stage-1's per-chunk completions markers, and the
-final output directory), not by extract_status.
+final output directory).
 """
 
 import argparse

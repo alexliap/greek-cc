@@ -55,6 +55,7 @@ from datatrove.pipeline.formatters import (
 )
 from datatrove.pipeline.readers.parquet import ParquetReader
 from datatrove.pipeline.writers.parquet import ParquetWriter
+from huggingface_hub import HfApi
 
 from greek_cc.dedup import OnlineMinhashDedup
 from greek_cc.warc_reader import CCIndexGreekReader
@@ -307,15 +308,13 @@ def run_extraction_stage_2_dedup_and_write(
 
 
 def _publish(local_dir: Path, repo_path_prefix: str) -> None:
-    from huggingface_hub import HfApi
-
     repo_id = os.environ.get("HF_DATASET_REPO")
     if not repo_id:
         logger.warning("HF_TOKEN is set but HF_DATASET_REPO is not -- skipping upload")
         return
 
     api = HfApi()
-    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
+    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=True)
     for path in local_dir.glob("*.parquet"):
         api.upload_file(
             path_or_fileobj=str(path),

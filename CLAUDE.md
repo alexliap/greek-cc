@@ -95,13 +95,19 @@ docker exec greek-cc-postgres-1 psql -U airflow -d greek_cc \
   -c "select status, count(*) from part_status group by status"
 ```
 
-(`extract_status` still exists in that database from before extraction moved
-off Airflow/Postgres — it's orphaned, nothing writes to it anymore, don't
-trust it for current state.)
-
 Extraction progress is now just what's on disk on whichever machine is running
 `greek-cc-extract`: `extractions/_stage_1/<crawl>/chunk_*/` for in-flight
 chunks, `extractions/<crawl>/*.parquet` once a crawl is fully done.
+
+When `HF_TOKEN`/`HF_DATASET_REPO` are set, both stages also publish to that
+repo as they go, gated the same way as the manifest side (warn-and-skip if
+unset): each stage-1 chunk's survivors upload to
+`raw/crawl=<crawl>/chunk=<offset>/` right after that chunk finishes (see
+`extract.py`'s `_publish` call in `run_extraction_stage_1_chunk`) — these are
+*pre-dedup*, since `OnlineMinhashDedup` only runs in stage 2, so they can
+still contain cross-chunk near-duplicates. The final deduped output uploads
+to `crawl=<crawl>/` once stage 2 finishes. `_publish` creates the repo
+`private=True` if it doesn't already exist — never flip that without asking.
 
 Extraction throughput is not logged directly. Successful extractions produce no
 log line; only rejects do (`discarding data`). Counting those gives a **lower
@@ -109,15 +115,28 @@ bound** on docs/min — useful, but never quote it as a measurement.
 
 ## Performance, honestly
 
-Measured floor on the Pi: **49.3 docs/min**, i.e. one 100k-row chunk in ≤33.8 h,
-184 chunks per crawl ⇒ roughly **8 months**. `plan_of_action.md` §6.1 estimated
-~100 docs/s and was wrong by about 100×; the banner there explains why.
+Measured floor on the Pi at `--tasks 1`: **49.3 docs/min**, i.e. one 100k-row
+chunk in ≤33.8 h, 184 chunks per crawl ⇒ roughly **8 months**. `plan_of_action.md`
+§6.1 estimated ~100 docs/s and was wrong by about 100×; the banner there
+explains why.
 
-Extraction is pinned to one core by `tasks=1` in `src/greek_cc/extract.py`.
-That was a memory guard, and the constraint it guarded against is gone —
-`warc_reader.py` now bounds read-ahead with a sliding window. Raising it on a
-multi-core machine is the single change that takes this from months to about
-a week.
+`--tasks` (CLI flag, `src/greek_cc/cli.py`, default `cpu_count - 2`) is no
+longer pinned to 1 — that was a memory guard against concurrent GlotLID
+downloads and Docker-Desktop CPU starvation (see the comment above
+`LocalPipelineExecutor` in `extract.py`), and both are handled now (a
+single-task warm-up caches GlotLID before any multi-task run touches it;
+extraction no longer runs under Airflow/Docker Desktop at all). On a 23-core/
+98GB machine at `--tasks 21`, one 100k-row chunk took ~20 minutes wall clock
+— about 100x the Pi's `--tasks 1` floor, confirming the earlier prediction.
+`CCIndexGreekReader` (`warc_reader.py`) fetches one row at a time per
+worker with no internal threading — concurrency is `--tasks` alone, one
+number instead of two multiplied together (an earlier `ThreadPoolExecutor`
+inside the reader was deliberately removed for exactly this reason). Most of
+that wall-clock time is S3 fetch latency, not CPU: datatrove's per-stage
+"Total Runtime" stats only cover the filter/extract/write stages, not the
+reader, so they'll under-report a chunk's true wall time — cross-check
+against the `stage 1 chunk N/M` log timestamps in `extract.log`, not the
+stats block, to see how long a chunk actually took.
 
 ## Conventions
 

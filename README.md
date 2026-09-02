@@ -8,7 +8,9 @@ Extracting Greek-language text from Common Crawl.
 - **`greek-cc-extract`** (CLI, run on demand) — downloads one crawl's
   manifest from that HF Hub repo, fetches the WARC records and runs them
   through the datatrove cleaning pipeline. CPU-bound. Not an Airflow job —
-  just `uv run greek-cc-extract <crawl>`.
+  just `uv run greek-cc-extract <crawl>`. When `HF_DATASET_REPO` is set, it
+  also publishes there as it goes: each chunk's (pre-dedup) survivors right
+  after that chunk finishes, and the final deduped crawl output at the end.
 
 The two don't talk to each other directly, Airflow-level or database-level —
 they coordinate only by manifests landing on HF Hub. That's what lets
@@ -48,7 +50,7 @@ Extraction (any machine with this repo cloned):
 C++17 compiler — `xcode-select --install` on macOS if `uv sync` fails on it.
 `python-magic` needs the native `libmagic` too — `brew install libmagic` on
 macOS. `.env` needs `AWS_*` and `HF_TOKEN`/`HF_MANIFEST_REPO` at minimum;
-see `.env.example`.
+add `HF_DATASET_REPO` too to publish extraction output. See `.env.example`.
 
 ## Notes
 
