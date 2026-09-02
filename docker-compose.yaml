@@ -17,8 +17,11 @@ x-airflow-env: &airflow-env
   # scheduler) fails verification on the api-server ("Invalid auth token")
   AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET}
   # POSTGRES_HOST defaults to the postgres service in this compose project.
-  # Set it in .env (alongside COMPOSE_FILE, see docs/running-on-macos.md) to
-  # point at a Postgres running on another machine instead.
+  # Only the Pi runs Airflow today, and it hosts its own Postgres (local-db
+  # profile); pointing this at a remote Postgres also needs clearing
+  # airflow-init's `depends_on: postgres`, since a machine without the
+  # local-db profile never starts that service -- there's no overlay for
+  # that anymore (docker-compose.remote-db.yaml, removed as unused).
   # AIRFLOW_DB_NAME gives each machine its own Airflow metadata database, even
   # when they share one Postgres server. Airflow's schedulers are homogeneous --
   # any scheduler sharing a metadata DB can run any DAG in it -- so two machines
