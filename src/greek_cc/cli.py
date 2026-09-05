@@ -48,8 +48,10 @@ def main() -> None:
             "connections (default: cpu_count - 2, leaving headroom for the "
             "OS). Each worker loads its own copy of the ~1.57GB GlotLID model "
             "-- watch memory if you raise this on a constrained machine. "
-            "Stage 2 dedup always runs single-task: it needs a whole-crawl "
-            "view to catch cross-chunk near-duplicates."
+            "Stage 2's MinHash dedup reuses this same count for its "
+            "signature/filter passes and derives its own bucket-stage task "
+            "count (a multiple of 14); only its cluster-resolution pass stays "
+            "single-task, per datatrove's own MinhashDedupCluster API."
         ),
     )
     args = parser.parse_args()
@@ -78,11 +80,13 @@ def main() -> None:
 
     logger.info("%s: stage 2 dedup + finalize", args.crawl)
     result = extract.run_extraction_stage_2_dedup_and_write(
-        args.crawl, manifest_path, args.out_dir, args.out_dir, publish=True
+        args.crawl, manifest_path, args.out_dir, args.out_dir,
+        tasks=args.tasks, publish=True,
     )
     logger.info(
-        "%s: done -- %d -> %d rows, output at %s",
-        args.crawl, result["row_count_in"], result["row_count_out"], result["output_path"],
+        "%s: done -- %d -> %d rows (%d removed as near-duplicates), output at %s",
+        args.crawl, result["row_count_in"], result["row_count_out"],
+        result["row_count_removed"], result["output_path"],
     )
 
 

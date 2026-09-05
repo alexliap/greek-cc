@@ -3,16 +3,18 @@
 Reuses FineWeb-2's own datatrove filter chain and ell_Grek.yml thresholds
 verbatim (§5.3: "Do not hand-tune these yourself" -- the config in configs/
 is vendored straight from https://github.com/huggingface/fineweb-2). The only
-custom pieces are the reader (range-fetch from S3 instead of a local WARC
-file, see warc_reader.py) and the dedup step (online per-crawl tagging
-instead of an offline global pass, see dedup.py). No C4 filters -- confirmed
-against FineWeb-2's actual pipeline script
+custom piece is the reader (range-fetch from S3 instead of a local WARC file,
+see warc_reader.py) -- dedup is now datatrove's own stock 4-stage MinHash
+pipeline (signature -> buckets -> cluster -> filter), the same one FineWeb
+itself runs, wired up in run_extraction_stage_2_dedup_and_write. No C4
+filters -- confirmed against FineWeb-2's actual pipeline script
 (fineweb-2-pipeline.py: "# we do not apply the C4 filters"), which is
 authoritative over plan_of_action.md §5.2's diagram (that line appears stale).
 
-Docs dropped by each filter aren't written anywhere (no exclusion_writer) --
-§5.5's `_removed` sibling config is deliberately skipped to avoid extra
-Parquet clutter.
+Stage 1's filters drop docs without writing them anywhere (no
+exclusion_writer) -- §5.5's `_removed` sibling config is deliberately skipped
+to avoid extra Parquet clutter, and stage 2's dedup filter follows the same
+rule for the same reason (see that function's docstring).
 
 Split into two stages because a full crawl's manifest is tens of millions of
 rows, and `CCIndexGreekReader` materializes whatever slice it's given as
@@ -21,11 +23,13 @@ at once OOM-crashed the Pi twice. Stage 1 runs everything up to (but not
 including) the per-crawl MinHash dedup over one bounded manifest chunk at a
 time -- most rows get dropped by these filters, so each chunk's survivors are
 a small Parquet file under out_dir/_stage_1/{crawl}/chunk_{offset}/. Stage 2
-runs once all chunks are done: reads every chunk's survivors back in (small
-enough to buffer, unlike the raw manifest), runs the online MinHash dedup
-(which needs a whole-crawl view to catch cross-chunk near-duplicates and, by
-design, buffers its full input -- see dedup.py), and writes the final output
-to out_dir/{crawl}/, same location/shape as before this split.
+runs once all chunks are done: reads every chunk's survivors back in and runs
+datatrove's 4-stage MinHash dedup over the whole crawl (a prior single-pass,
+in-RAM, single-task custom dedup step OOM-killed at 42GB RSS on a real ~15-18M
+row crawl -- the 4-stage pipeline is memory-bounded because each stage
+streams or works on small hash/id metadata rather than buffering full
+documents), and writes the final output to out_dir/{crawl}/, same
+location/shape as before this split.
 """
 
 import logging
@@ -38,6 +42,13 @@ import polars as pl
 import pyarrow as pa
 import yaml
 from datatrove.executor.local import LocalPipelineExecutor
+from datatrove.pipeline.dedup.minhash import (
+    MinhashConfig,
+    MinhashDedupBuckets,
+    MinhashDedupCluster,
+    MinhashDedupFilter,
+    MinhashDedupSignature,
+)
 from datatrove.pipeline.extractors import Trafilatura
 from datatrove.pipeline.extractors.base import ExtractorSandbox
 from datatrove.pipeline.filters import (
@@ -55,9 +66,9 @@ from datatrove.pipeline.formatters import (
 )
 from datatrove.pipeline.readers.parquet import ParquetReader
 from datatrove.pipeline.writers.parquet import ParquetWriter
+from datatrove.utils.hashing import HashConfig
 from huggingface_hub import HfApi
 
-from greek_cc.dedup import OnlineMinhashDedup
 from greek_cc.warc_reader import CCIndexGreekReader
 
 logger = logging.getLogger(__name__)
@@ -74,6 +85,15 @@ ExtractorSandbox.set_oom_score_adj = lambda self, score: None
 
 LANGUAGE = "ell_Grek"
 CONFIG_PATH = Path(__file__).parent / "configs" / "ell_Grek.yml"
+
+# FineWeb-2's own numbers (confirmed against their actual pipeline script),
+# also what the prior custom dedup step used.
+MINHASH_CONFIG = MinhashConfig(
+    hash_config=HashConfig(hash_fc="xxhash", precision=64),
+    num_buckets=14,
+    hashes_per_bucket=8,
+    n_grams=5,
+)
 
 # Explicit schema for Stage 1's writer. LanguageFilter(keep_top_pairs_threshold=0.01)
 # adds a *variable* number of top_language_{lang}_score metadata keys per doc
@@ -249,7 +269,7 @@ def run_extraction_stage_1_chunk(
     )
 
     if publish and os.environ.get("HF_TOKEN"):
-        # pre-dedup: OnlineMinhashDedup only runs in stage 2, across the whole
+        # pre-dedup: MinHash dedup only runs in stage 2, across the whole
         # crawl, so this chunk can still contain near-duplicates of survivors
         # from other chunks -- kept under raw/ so it's never mistaken for the
         # final <crawl>/ output stage 2 publishes later
@@ -265,23 +285,105 @@ def run_extraction_stage_2_dedup_and_write(
     manifest_path: Path,
     stage_1_dir: Path,
     out_dir: Path,
+    tasks: int = 1,
     publish: bool = False,
 ) -> dict:
-    """Merge every chunk's survivors, dedup once across the whole crawl, write final output."""
+    """Merge every chunk's survivors, dedup once across the whole crawl, write final output.
+
+    Runs datatrove's own stock 4-stage MinHash dedup (signature -> buckets ->
+    cluster -> filter) instead of buffering the whole crawl in RAM -- a prior
+    single-pass, single-task, in-RAM custom dedup step OOM-killed at 42GB RSS
+    on a real ~15-18M row crawl. Each stage streams or works on small hash/id
+    metadata rather than full documents, so memory stays bounded regardless of
+    crawl size, and 3 of the 4 stages parallelize across `tasks`.
+
+    Keeps only the first document in each MinHash cluster and drops the rest
+    (near-duplicates of it) -- no separate `_removed` output. Anyone who wants
+    the dropped set can reconstruct it themselves by anti-joining the raw
+    per-chunk uploads (`raw/<crawl>/chunk=.../`, stage 1's pre-dedup output)
+    against the final `<crawl>/` output on `warc_filename`/`warc_record_offset`,
+    so writing it out ourselves would just be a redundant derived view.
+    """
     row_count_in = pl.scan_parquet(manifest_path).select(pl.len()).collect().item()
     stage_1_crawl_dir = Path(stage_1_dir) / "_stage_1" / crawl
     crawl_out = Path(out_dir) / crawl
 
-    pipeline = [
-        ParquetReader(str(stage_1_crawl_dir), glob_pattern="chunk_*/*.parquet"),
-        OnlineMinhashDedup(language=LANGUAGE),
-        ParquetWriter(str(crawl_out), compression="zstd", expand_metadata=True),
-    ]
-
-    executor = LocalPipelineExecutor(
-        pipeline=pipeline, tasks=1, logging_dir=str(crawl_out / "logs")
+    row_count_stage_2_in = (
+        pl.scan_parquet(str(stage_1_crawl_dir / "chunk_*" / "*.parquet"))
+        .select(pl.len())
+        .collect()
+        .item()
     )
-    executor.run()
+
+    stage_2_dir = Path(out_dir) / "_stage_2" / crawl
+    sig_dir = stage_2_dir / "signatures"
+    buckets_dir = stage_2_dir / "buckets"
+    remove_ids_dir = stage_2_dir / "remove_ids"
+
+    LocalPipelineExecutor(
+        pipeline=[
+            ParquetReader(str(stage_1_crawl_dir), glob_pattern="chunk_*/*.parquet"),
+            MinhashDedupSignature(
+                output_folder=str(sig_dir), config=MINHASH_CONFIG, language=LANGUAGE
+            ),
+        ],
+        tasks=tasks,
+        logging_dir=str(sig_dir / "logs"),
+    ).run()
+
+    # MinhashDedupBuckets re-partitions signatures by hash bucket across an
+    # independent worker count, and asserts world_size % num_buckets == 0 --
+    # derive the nearest multiple of num_buckets at or below `tasks` rather
+    # than exposing a second CLI knob (e.g. tasks=21 -> 14).
+    buckets_tasks = MINHASH_CONFIG.num_buckets * max(
+        1, tasks // MINHASH_CONFIG.num_buckets
+    )
+    LocalPipelineExecutor(
+        pipeline=[
+            MinhashDedupBuckets(
+                input_folder=str(sig_dir),
+                output_folder=str(buckets_dir),
+                config=MINHASH_CONFIG,
+            )
+        ],
+        tasks=buckets_tasks,
+        logging_dir=str(buckets_dir / "logs"),
+    ).run()
+
+    # Single-task by API requirement (in-RAM union-find over every bucket's
+    # candidate pairs) -- cheap even at full-crawl scale since it only touches
+    # small hash/id files from the buckets stage, never document text.
+    LocalPipelineExecutor(
+        pipeline=[
+            MinhashDedupCluster(
+                input_folder=str(buckets_dir),
+                output_folder=str(remove_ids_dir),
+                config=MINHASH_CONFIG,
+                save_cluster_id=True,
+                save_cluster_size=True,
+            )
+        ],
+        tasks=1,
+        logging_dir=str(remove_ids_dir / "logs"),
+    ).run()
+
+    # Must reuse the exact same tasks/glob as the signature stage above,
+    # reading the same unmodified stage_1_crawl_dir, so each rank's file
+    # assignment lines up with the remove-ids that rank's signature stage
+    # produced.
+    LocalPipelineExecutor(
+        pipeline=[
+            ParquetReader(str(stage_1_crawl_dir), glob_pattern="chunk_*/*.parquet"),
+            MinhashDedupFilter(
+                input_folder=str(remove_ids_dir),
+                load_cluster_ids=True,
+                load_cluster_sizes=True,
+            ),
+            ParquetWriter(str(crawl_out), compression="zstd", expand_metadata=True),
+        ],
+        tasks=tasks,
+        logging_dir=str(crawl_out / "logs"),
+    ).run()
 
     output_files = list(crawl_out.glob("*.parquet"))
     row_count_out = (
@@ -289,21 +391,24 @@ def run_extraction_stage_2_dedup_and_write(
         if output_files
         else 0
     )
+    row_count_removed = row_count_stage_2_in - row_count_out
 
     if publish and os.environ.get("HF_TOKEN"):
         _publish(crawl_out, crawl)
     elif publish:
         logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
 
-    # only delete Stage 1's intermediate survivors once the final write above
-    # is confirmed -- if this stage itself fails/crashes, a retry can still
-    # read them back in without redoing every chunk
+    # only delete Stage 1/2's intermediates once the final write above is
+    # confirmed -- if this stage itself fails/crashes, a retry can still read
+    # stage 1's survivors back in without redoing every chunk
     shutil.rmtree(stage_1_crawl_dir, ignore_errors=True)
+    shutil.rmtree(stage_2_dir, ignore_errors=True)
 
     return {
         "output_path": str(crawl_out),
         "row_count_in": row_count_in,
         "row_count_out": row_count_out,
+        "row_count_removed": row_count_removed,
     }
 
 
