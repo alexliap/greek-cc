@@ -398,11 +398,8 @@ def run_extraction_stage_2_dedup_and_write(
     elif publish:
         logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
 
-    # only delete Stage 1/2's intermediates once the final write above is
-    # confirmed -- if this stage itself fails/crashes, a retry can still read
-    # stage 1's survivors back in without redoing every chunk
-    shutil.rmtree(stage_1_crawl_dir, ignore_errors=True)
-    shutil.rmtree(stage_2_dir, ignore_errors=True)
+    # shutil.rmtree(stage_1_crawl_dir, ignore_errors=True)
+    # shutil.rmtree(stage_2_dir, ignore_errors=True)
 
     return {
         "output_path": str(crawl_out),
