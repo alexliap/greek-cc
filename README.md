@@ -28,7 +28,6 @@ known traps, and a runbook.
 - `dags/` — `greek_cc_manifest`, bind-mounted into `/opt/airflow/dags`.
 - `docker/Dockerfile` — Airflow base plus this project's dependencies.
 - `docker-compose.yaml` — the Airflow deployment (manifest side only).
-- `manifests/` — manifest Parquet files and extraction output (gitignored).
 
 ## Usage
 
