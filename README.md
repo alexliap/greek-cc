@@ -2,33 +2,33 @@
 
 Extracting Greek-language text from Common Crawl.
 
-- **`greek_cc_manifest`** (Airflow DAG) — walks a crawl's index and writes a
+- **`greek_cc_manifest`** (Airflow DAG): walks a crawl's index and writes a
   Parquet manifest of the Greek records worth fetching, then uploads it to
   the HF Hub dataset repo `alexliap/greek-cc-manifests`. Network-bound.
-- **`greek-cc-extract`** (CLI, run on demand) — downloads one crawl's
+- **`greek-cc-extract`** (CLI, run on demand): downloads one crawl's
   manifest from that HF Hub repo, fetches the WARC records and runs them
-  through the datatrove cleaning pipeline. CPU-bound. Not an Airflow job —
+  through the datatrove cleaning pipeline. CPU-bound. Not an Airflow job,
   just `uv run greek-cc-extract <crawl>`. When `HF_DATASET_REPO` is set, it
   also publishes there as it goes: each chunk's (pre-dedup) survivors right
   after that chunk finishes, and the final deduped crawl output at the end.
 
-The two don't talk to each other directly, Airflow-level or database-level —
-they coordinate only by manifests landing on HF Hub. That's what lets
+The two don't talk to each other directly, Airflow-level or database-level.
+They coordinate only by manifests landing on HF Hub. That's what lets
 extraction run anywhere (a Mac, say) with nothing but this repo's Python
 environment and a `.env`.
 
 ## Layout
 
-- `src/greek_cc/` — the pipeline itself; installed into the Airflow image,
+- `src/greek_cc/`: the pipeline itself; installed into the Airflow image,
   and locally wherever `greek-cc-extract` runs.
-- `src/greek_cc/cli.py` — the on-demand extraction entrypoint.
-- `dags/` — `greek_cc_manifest`, bind-mounted into `/opt/airflow/dags`.
-- `docker/Dockerfile` — Airflow base plus this project's dependencies.
-- `docker-compose.yaml` — the Airflow deployment (manifest side only).
+- `src/greek_cc/cli.py`: the on-demand extraction entrypoint.
+- `dags/`: `greek_cc_manifest`, bind-mounted into `/opt/airflow/dags`.
+- `docker/Dockerfile`: Airflow base plus this project's dependencies.
+- `docker-compose.yaml`: the Airflow deployment (manifest side only).
 
 ## Usage
 
-Manifests (Airflow, wherever Postgres/the DAG lives — the Pi today):
+Manifests (Airflow, wherever Postgres/the DAG lives, the Pi today):
 
     docker compose up -d              # start
     docker compose build airflow-init # rebuild the image
@@ -43,8 +43,8 @@ Extraction (any machine with this repo cloned):
     uv run greek-cc-extract CC-MAIN-2024-22
 
 `fasttext-numpy2-wheel` (GlotLID's backend) builds from source and needs a
-C++17 compiler — `xcode-select --install` on macOS if `uv sync` fails on it.
-`python-magic` needs the native `libmagic` too — `brew install libmagic` on
+C++17 compiler: `xcode-select --install` on macOS if `uv sync` fails on it.
+`python-magic` needs the native `libmagic` too: `brew install libmagic` on
 macOS. `.env` needs `AWS_*` and `HF_TOKEN`/`HF_MANIFEST_REPO` at minimum;
 add `HF_DATASET_REPO` too to publish extraction output. See `.env.example`.
 
