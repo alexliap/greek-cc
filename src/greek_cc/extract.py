@@ -262,18 +262,23 @@ def run_extraction_stage_1_chunk(
     executor.run()
 
     survivor_files = list(chunk_out.glob("*.parquet"))
-    row_count_survivors = (
-        pl.scan_parquet(survivor_files).select(pl.len()).collect().item()
-        if survivor_files
-        else 0
-    )
+    if survivor_files:
+        merged = pl.scan_parquet(survivor_files).collect()
+        row_count_survivors = merged.height
+        # tasks>1 makes ParquetWriter write one file per rank -- collapse
+        # those into a single file per chunk instead of uploading (and
+        # having stage 2 read back) `tasks` small, often near-empty shards
+        if len(survivor_files) > 1:
+            for f in survivor_files:
+                f.unlink()
+            merged.write_parquet(
+                chunk_out / f"chunk_{offset:012d}.parquet", compression="zstd"
+            )
+    else:
+        row_count_survivors = 0
 
     if publish and os.environ.get("HF_TOKEN"):
-        # pre-dedup: MinHash dedup only runs in stage 2, across the whole
-        # crawl, so this chunk can still contain near-duplicates of survivors
-        # from other chunks -- kept under raw/ so it's never mistaken for the
-        # final <crawl>/ output stage 2 publishes later
-        _publish(chunk_out, f"raw/{crawl}/chunk={offset:012d}")
+        _publish(chunk_out, f"raw/{crawl}")
     elif publish:
         logger.warning("publish=True but HF_TOKEN is not set -- skipping upload")
 
@@ -300,9 +305,10 @@ def run_extraction_stage_2_dedup_and_write(
     Keeps only the first document in each MinHash cluster and drops the rest
     (near-duplicates of it) -- no separate `_removed` output. Anyone who wants
     the dropped set can reconstruct it themselves by anti-joining the raw
-    per-chunk uploads (`raw/<crawl>/chunk=.../`, stage 1's pre-dedup output)
-    against the final `<crawl>/` output on `warc_filename`/`warc_record_offset`,
-    so writing it out ourselves would just be a redundant derived view.
+    per-chunk uploads (`raw/<crawl>/`, stage 1's pre-dedup output, one file
+    per chunk) against the final `<crawl>/` output on
+    `warc_filename`/`warc_record_offset`, so writing it out ourselves would
+    just be a redundant derived view.
     """
     row_count_in = pl.scan_parquet(manifest_path).select(pl.len()).collect().item()
     stage_1_crawl_dir = Path(stage_1_dir) / "_stage_1" / crawl
