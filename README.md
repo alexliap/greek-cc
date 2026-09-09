@@ -17,9 +17,6 @@ they coordinate only by manifests landing on HF Hub. That's what lets
 extraction run anywhere (a Mac, say) with nothing but this repo's Python
 environment and a `.env`.
 
-New here (human or agent)? Start with [CLAUDE.md](CLAUDE.md) — orientation,
-known traps, and a runbook.
-
 ## Layout
 
 - `src/greek_cc/` — the pipeline itself; installed into the Airflow image,
