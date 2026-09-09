@@ -34,7 +34,6 @@ location/shape as before this split.
 
 import logging
 import os
-import shutil
 from functools import partial
 from pathlib import Path
 
