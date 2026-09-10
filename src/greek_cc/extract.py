@@ -230,19 +230,6 @@ def run_extraction_stage_1_chunk(
 
     executor = LocalPipelineExecutor(
         pipeline=pipeline,
-        # tasks>1 makes datatrove fork a worker process per task (each loading
-        # its own copy of the ~1.57GB GlotLID model plus pipeline state). Tried
-        # tasks=2 on this Mac's Docker Desktop VM (7.65GB total) and it pushed
-        # the scheduler container to 5.7GB/7.65GB, starving the apiserver of
-        # CPU long enough that in-flight task heartbeat JWTs expired waiting to
-        # be validated -- the apiserver logged 50-80s request latencies and
-        # jwt.exceptions.ExpiredSignatureError, and the resulting 403 reset the
-        # running chunk. That was under Airflow/Docker Desktop specifically;
-        # extraction no longer runs there (see CLAUDE.md's "Performance,
-        # honestly"), but raising this still needs watching memory/CPU -- each
-        # worker loads its own ~1.57GB GlotLID copy. CCIndexGreekReader shards
-        # its rows across ranks (see warc_reader.py) so tasks>1 here actually
-        # splits the fetch/extract work instead of redoing it per worker.
         tasks=tasks,
         # "fork" (the simpler, faster choice) actually deadlocks here once
         # tasks>1: the CLI touches polars (compute_chunk_bounds) before this
@@ -264,7 +251,7 @@ def run_extraction_stage_1_chunk(
     if survivor_files:
         merged = pl.scan_parquet(survivor_files).collect()
         row_count_survivors = merged.height
-        # tasks>1 makes ParquetWriter write one file per rank -- collapse
+        # tasks>1 makes ParquetWriter write one file per rank - collapse
         # those into a single file per chunk instead of uploading (and
         # having stage 2 read back) `tasks` small, often near-empty shards
         if len(survivor_files) > 1:

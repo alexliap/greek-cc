@@ -32,7 +32,11 @@ from greek_cc.index import (
 OUT_DIR = Path("/opt/airflow/manifests")
 
 # a part returns to the queue on error and is retried by a later run; after this
-# many attempts it is marked failed and the crawl moves on without it
+# many attempts within one cycle it's marked failed. merge_if_complete then
+# requeues every failed part for a fresh attempt budget instead of giving up,
+# so a crawl never merges -- and the DAG never moves on to the next crawl,
+# since claim_next_parts always drains the oldest crawl_id with pending work
+# first -- while any of its parts is still failed.
 MAX_PART_ATTEMPTS = 5
 
 
@@ -136,6 +140,11 @@ with DAG(
         Returns the crawl id so `publish` (downstream) knows what to upload --
         skip/failure here propagates to it via the default all_success trigger
         rule, so it only runs after an actual successful merge.
+
+        A crawl below min_success_ratio doesn't give up: its failed parts are
+        requeued for another attempt cycle and this run just skips, so the
+        crawl keeps retrying (and the DAG doesn't move on to the next crawl --
+        see MAX_PART_ATTEMPTS's comment) until it actually clears the ratio.
         """
         if not parts:
             raise AirflowSkipException("no parts claimed this run")
@@ -153,14 +162,12 @@ with DAG(
             ratio = success / total if total else 0.0
 
             if ratio < min_ratio:
-                message = (
-                    f"only {success}/{total} parts succeeded "
-                    f"({ratio:.1%} < {min_ratio:.1%})"
+                requeued = db.requeue_failed_parts(conn, crawl)
+                raise AirflowSkipException(
+                    f"{crawl}: only {success}/{total} parts succeeded "
+                    f"({ratio:.1%} < {min_ratio:.1%}); requeued {requeued} "
+                    f"failed part(s) for another attempt"
                 )
-                db.mark_crawl_failed(
-                    conn, crawl, message, success, total - success, min_ratio
-                )
-                raise RuntimeError(f"[{crawl}] {message}; not merging.")
 
             db.mark_crawl_merging(conn, crawl)
             fragments = [Path(p) for p in db.get_successful_fragments(conn, crawl)]

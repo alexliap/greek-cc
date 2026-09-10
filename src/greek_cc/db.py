@@ -169,6 +169,28 @@ def mark_part_error(
     conn.commit()
 
 
+def requeue_failed_parts(conn, crawl_id: str) -> int:
+    """Send every terminally-failed part for a crawl back to the queue.
+
+    Resets attempt_count to 0 so the next cycle gets a fresh MAX_PART_ATTEMPTS
+    budget instead of being immediately re-failed on its first claim. Used by
+    merge_if_complete so a crawl keeps retrying instead of giving up while any
+    part is still failed. Returns how many parts were requeued.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE part_status
+            SET status = 'pending', attempt_count = 0, last_error = NULL, updated_at = now()
+            WHERE crawl_id = %s AND status = 'failed'
+            """,
+            (crawl_id,),
+        )
+        count = cur.rowcount
+    conn.commit()
+    return count
+
+
 def get_part_status_counts(conn, crawl_id: str) -> dict[str, int]:
     with conn.cursor() as cur:
         cur.execute(
@@ -230,23 +252,3 @@ def mark_crawl_done(
     conn.commit()
 
 
-def mark_crawl_failed(
-    conn,
-    crawl_id: str,
-    error: str,
-    success_parts: int,
-    failed_parts: int,
-    min_success_ratio: float,
-) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE crawl_status
-            SET status = 'failed', last_error = %s,
-                success_parts = %s, failed_parts = %s, min_success_ratio_used = %s,
-                finished_at = now(), updated_at = now()
-            WHERE crawl_id = %s
-            """,
-            (error, success_parts, failed_parts, min_success_ratio, crawl_id),
-        )
-    conn.commit()
