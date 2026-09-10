@@ -55,5 +55,5 @@ COPY --chown=airflow:root dags/ /opt/airflow/dags/
 
 # Shared by docker-compose's airflow-init and every Railway service -- see
 # the script itself for why.
-COPY docker/start-with-init.sh /opt/airflow/start-with-init.sh
+COPY --chown=airflow:root docker/start-with-init.sh /opt/airflow/start-with-init.sh
 RUN chmod 755 /opt/airflow/start-with-init.sh
