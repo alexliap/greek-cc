@@ -56,7 +56,7 @@ with DAG(
     # one run = one part-file fetch, so this interval *is* the request rate.
     # a timedelta (not a cron string) so the spacing is a true fixed 40min,
     # not the uneven :00/:40 alternation a "*/40 * * * *" cron would give
-    schedule=timedelta(minutes=20),
+    schedule=timedelta(minutes=15),
     catchup=False,
     max_active_runs=1,
     params={
