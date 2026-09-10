@@ -5,10 +5,10 @@ CC-MAIN-2024-22 through CC-MAIN-2026-30 — picks up where FineWeb-2's
 """
 
 CRAWLS = [
-    "CC-MAIN-2024-22",
-    "CC-MAIN-2024-26",
-    "CC-MAIN-2024-30",
-    "CC-MAIN-2024-33",
+    # "CC-MAIN-2024-22",
+    # "CC-MAIN-2024-26",
+    # "CC-MAIN-2024-30",
+    # "CC-MAIN-2024-33",
     "CC-MAIN-2024-38",
     "CC-MAIN-2024-42",
     "CC-MAIN-2024-46",
