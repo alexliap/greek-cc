@@ -125,26 +125,14 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       <<: *airflow-env
+      AIRFLOW_RUN_DB_INIT: "1"
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD}
     # keep the image's own entrypoint: it registers an /etc/passwd entry for our
-    # host UID, without which airflow's getuser() call blows up
-    command:
-      - bash
-      - -c
-      - |
-        airflow db migrate
-        python -c "
-        import json, os
-        path = os.environ['AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE']
-        json.dump({os.environ['_AIRFLOW_WWW_USER_USERNAME']: os.environ['_AIRFLOW_WWW_USER_PASSWORD']}, open(path, 'w'))
-        print('seeded', path)
-        "
-        python -c "
-        from airflow.providers.postgres.hooks.postgres import PostgresHook
-        from greek_cc import db
-        db.ensure_schema(PostgresHook(postgres_conn_id='greek_cc_db').get_conn())
-        "
+    # host UID, without which airflow's getuser() call blows up. The same
+    # migrate/seed/ensure_schema steps this used to run inline now live in
+    # start-with-init.sh, shared with Railway's services (see docker/Dockerfile).
+    command: ["/opt/airflow/start-with-init.sh"]
     restart: "no"
 
   airflow-apiserver:

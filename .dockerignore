@@ -1,7 +1,15 @@
 # The build context is now the repo root, which holds 3.7GB of manifests, a
 # virtualenv and DB backups -- none of which the image needs. Deny everything,
-# then allow back exactly the three paths docker/Dockerfile COPYs.
+# then allow back exactly what docker/Dockerfile COPYs.
 *
 !pyproject.toml
 !README.md
 !src/
+!dags/
+# docker/ itself must be un-excluded before a nested negation can reach into
+# it (Docker skips negated files under an already-excluded directory), so
+# this re-excludes everything else under docker/ (e.g. postgres-init/) right
+# back after opening the directory up.
+!docker
+docker/*
+!docker/start-with-init.sh

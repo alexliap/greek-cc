@@ -46,3 +46,14 @@ RUN mkdir -p /home/airflow/.cache/huggingface \
 # when it changes -- --no-deps because everything it needs is above.
 COPY --chown=airflow:root src/ /opt/airflow/greek_cc_src/src/
 RUN pip install --no-cache-dir --no-deps /opt/airflow/greek_cc_src
+
+# Baked into the image (not bind-mounted) so this also runs on Railway, which
+# builds from git and has no host bind mount like docker-compose's
+# ./dags:/opt/airflow/dags. The Pi's compose setup still bind-mounts over
+# this, so local DAG edits there don't need a rebuild.
+COPY --chown=airflow:root dags/ /opt/airflow/dags/
+
+# Shared by docker-compose's airflow-init and every Railway service -- see
+# the script itself for why.
+COPY docker/start-with-init.sh /opt/airflow/start-with-init.sh
+RUN chmod 755 /opt/airflow/start-with-init.sh
