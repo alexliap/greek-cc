@@ -57,3 +57,10 @@ COPY --chown=airflow:root dags/ /opt/airflow/dags/
 # the script itself for why.
 COPY --chown=airflow:root docker/start-with-init.sh /opt/airflow/start-with-init.sh
 RUN chmod 755 /opt/airflow/start-with-init.sh
+
+# Only affects Railway: docker-compose always overrides the runtime user to
+# ${AIRFLOW_UID}:0 regardless of this. Railway has no such override, so
+# without this it runs as this build stage's non-root airflow user (uid
+# 50000) -- which can't write into a freshly attached Volume, since Railway
+# mounts those root-owned.
+USER root
