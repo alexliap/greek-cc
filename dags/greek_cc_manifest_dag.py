@@ -13,6 +13,8 @@ HF_TOKEN/HF_MANIFEST_REPO being set, so this is a no-op (with a warning) on a
 machine that hasn't configured them.
 """
 
+import os
+import shutil
 from datetime import timedelta
 from pathlib import Path
 
@@ -24,12 +26,17 @@ from greek_cc import db
 from greek_cc.crawls import CRAWLS
 from greek_cc.index import (
     fetch_part_manifest,
+    fragments_dir,
     merge_crawl_manifest,
     publish_manifest,
     warc_parquet_urls,
 )
 
 OUT_DIR = Path("/opt/airflow/manifests")
+
+DELETE_LOCAL_MANIFEST_AFTER_PUBLISH = (
+    os.environ.get("DELETE_LOCAL_MANIFEST_AFTER_PUBLISH", "false").lower() == "true"
+)
 
 # a part returns to the queue on error and is retried by a later run; after this
 # many attempts within one cycle it's marked failed. merge_if_complete then
@@ -192,9 +199,17 @@ with DAG(
 
         return crawl
 
-    @task(retries=2, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=15))
+    @task(
+        retries=2,
+        retry_delay=timedelta(minutes=2),
+        execution_timeout=timedelta(minutes=15),
+    )
     def publish(crawl: str) -> None:
-        publish_manifest(OUT_DIR / f"{crawl}.parquet")
+        output_path = OUT_DIR / f"{crawl}.parquet"
+        publish_manifest(output_path)
+        if DELETE_LOCAL_MANIFEST_AFTER_PUBLISH:
+            output_path.unlink(missing_ok=True)
+            shutil.rmtree(fragments_dir(crawl, OUT_DIR), ignore_errors=True)
 
     claimed = claim_work()
     fetched = fetch.expand(part=claimed)
