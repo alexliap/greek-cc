@@ -65,6 +65,15 @@ x-airflow-common: &airflow-common
   # compose build the same tag concurrently and the targets collide
   image: greek-cc-airflow:3.3.1
   user: "${AIRFLOW_UID}:0"
+  # Without this the whole stack stays down after a reboot or a dockerd restart,
+  # silently halting the crawl until someone notices and runs `up -d` by hand.
+  # "unless-stopped" (not "always") so a deliberate `docker compose stop` sticks
+  # instead of being undone on the next boot. airflow-init overrides this back
+  # to "no" -- it's a one-shot, and restarting it would re-run schema init.
+  # The daemon restarts containers independently of compose's depends_on
+  # ordering, so a service can come up before postgres is healthy; it exits and
+  # is retried by this policy until postgres is there.
+  restart: unless-stopped
   # Docker's embedded DNS forwards to the host's systemd-resolved stub
   # (127.0.0.53), which timed out under greek-cc's concurrent S3 fetches and
   # took the whole Pi down twice -- dockerd logged hundreds of "failed to query
@@ -105,6 +114,9 @@ services:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 5s
       retries: 10
+    # postgres holds all crawl state; it has to come back on boot for the same
+    # reason as the airflow services above (it isn't covered by their anchor)
+    restart: unless-stopped
 
   airflow-init:
     <<: *airflow-common
