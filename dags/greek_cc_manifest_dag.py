@@ -135,14 +135,17 @@ with DAG(
             conn.close()
         return part
 
-    # all_done (not the default all_success) so this still runs and evaluates the
-    # ratio even when some of this run's mapped `fetch` instances failed. It takes
-    # the claimed batch directly rather than fetch's mapped output, since pulling
-    # XCom from a mix of succeeded/failed mapped instances is its own headache and
-    # the crawl id is all this task actually needs from upstream.
-    @task(trigger_rule="all_done")
-    def merge_if_complete(parts: list[dict]) -> str:
-        """Merge the crawl once no part of it is outstanding.
+    # all_done (not the default all_success) so this still runs and evaluates
+    # readiness even when some of this run's mapped `fetch` instances failed.
+    # Deliberately takes no input from `claimed`/`fetched` -- it re-checks the
+    # DB itself (crawl_ready_to_merge) instead of trusting this cycle's claimed
+    # batch, so a crawl whose merge got interrupted (crashed, SIGKILLed, or the
+    # container restarted mid-merge -- left at status 'merging' with nothing
+    # left to gate on) gets picked back up on a later run instead of being
+    # silently abandoned once claim_work moves on to seeding the next crawl.
+    @task(trigger_rule="all_done", retries=2, retry_delay=timedelta(minutes=2))
+    def merge_if_complete() -> str:
+        """Merge whichever crawl is ready, if any.
 
         Returns the crawl id so `publish` (downstream) knows what to upload --
         skip/failure here propagates to it via the default all_success trigger
@@ -153,17 +156,15 @@ with DAG(
         crawl keeps retrying (and the DAG doesn't move on to the next crawl --
         see MAX_PART_ATTEMPTS's comment) until it actually clears the ratio.
         """
-        if not parts:
-            raise AirflowSkipException("no parts claimed this run")
-        crawl = parts[0]["crawl_id"]
         min_ratio = get_current_context()["params"]["min_success_ratio"]
 
         conn = _conn()
         try:
-            counts = db.get_part_status_counts(conn, crawl)
-            if counts.get("pending", 0) or counts.get("running", 0):
-                raise AirflowSkipException(f"{crawl} still has parts outstanding")
+            crawl = db.crawl_ready_to_merge(conn)
+            if crawl is None:
+                raise AirflowSkipException("no crawl ready to merge")
 
+            counts = db.get_part_status_counts(conn, crawl)
             total = sum(counts.values())
             success = counts.get("success", 0)
             ratio = success / total if total else 0.0
@@ -213,6 +214,6 @@ with DAG(
 
     claimed = claim_work()
     fetched = fetch.expand(part=claimed)
-    merged = merge_if_complete(claimed)
+    merged = merge_if_complete()
     fetched >> merged
     publish(merged)

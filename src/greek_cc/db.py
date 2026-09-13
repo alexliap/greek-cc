@@ -191,6 +191,34 @@ def requeue_failed_parts(conn, crawl_id: str) -> int:
     return count
 
 
+def crawl_ready_to_merge(conn) -> str | None:
+    """Return one crawl_id that's ready to (re-)merge, or None if none is.
+
+    "Ready" means started but not yet done/failed, with no part left pending
+    or running -- true both for a crawl that just finished fetching this
+    cycle and one whose previous merge attempt was interrupted (crashed, was
+    SIGKILLed, or the container restarted mid-merge, leaving it at status
+    'merging' with nothing to actually gate on). Ordered by crawl_id so an
+    interrupted older crawl takes priority over a freshly-finished newer one.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT crawl_id FROM crawl_status
+            WHERE status IN ('fetching', 'merging')
+            AND NOT EXISTS (
+                SELECT 1 FROM part_status
+                WHERE part_status.crawl_id = crawl_status.crawl_id
+                AND part_status.status IN ('pending', 'running')
+            )
+            ORDER BY crawl_id
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
 def get_part_status_counts(conn, crawl_id: str) -> dict[str, int]:
     with conn.cursor() as cur:
         cur.execute(
