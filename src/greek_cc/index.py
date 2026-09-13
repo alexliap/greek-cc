@@ -110,26 +110,35 @@ def fetch_part_manifest(
 
 
 def merge_crawl_manifest(crawl: str, fragment_paths: list[Path], out_dir: Path) -> int:
-    """Concatenate fragments, dedup once crawl-wide, write the final manifest."""
-    manifest = (
+    """Concatenate fragments, dedup once crawl-wide, write the final manifest.
+
+    sink_parquet (not collect()+write_parquet()) so the merged result streams
+    straight to disk through Polars' out-of-core engine instead of first being
+    fully materialized as one in-memory DataFrame -- the latter is what got
+    this task SIGKILLed on a larger crawl even with 8GB available, since
+    collect(engine="streaming") still holds the *final* result in memory
+    before write_parquet() ever runs, only the intermediate steps stream.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"{crawl}.parquet"
+
+    (
         pl.concat([pl.scan_parquet(p, hive_partitioning=False) for p in fragment_paths])
         .sort("warc_filename", "warc_record_offset")
         .unique(subset=["content_digest"], keep="first", maintain_order=True)
-        .collect(engine="streaming")
+        .sink_parquet(output_path, compression="zstd")
     )
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / f"{crawl}.parquet"
-    manifest.write_parquet(output_path, compression="zstd")
+    row_count = pl.scan_parquet(output_path).select(pl.len()).collect().item()
 
     logger.info(
         "%s merged %d fragments -> %d rows at %s",
         crawl,
         len(fragment_paths),
-        len(manifest),
+        row_count,
         output_path,
     )
-    return len(manifest)
+    return row_count
 
 
 def publish_manifest(output_path: Path) -> None:
