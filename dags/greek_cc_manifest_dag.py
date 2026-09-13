@@ -26,7 +26,6 @@ from greek_cc import db
 from greek_cc.crawls import CRAWLS
 from greek_cc.index import (
     fetch_part_manifest,
-    fragments_dir,
     merge_crawl_manifest,
     publish_manifest,
     warc_parquet_urls,
@@ -207,7 +206,7 @@ with DAG(
         publish_manifest(output_path)
         if DELETE_LOCAL_MANIFEST_AFTER_PUBLISH:
             output_path.unlink(missing_ok=True)
-            shutil.rmtree(fragments_dir(crawl, OUT_DIR), ignore_errors=True)
+            shutil.rmtree(OUT_DIR / crawl, ignore_errors=True)
 
     claimed = claim_work()
     fetched = fetch.expand(part=claimed)
