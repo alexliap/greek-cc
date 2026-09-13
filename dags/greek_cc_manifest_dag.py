@@ -61,8 +61,6 @@ with DAG(
     max_active_runs=1,
     params={
         "min_success_ratio": Param(1.0, type="number", minimum=0.0, maximum=1.0),
-        # how many parts one run fetches concurrently via dynamic task mapping
-        "batch_size": Param(1, type="integer", minimum=1, maximum=50),
     },
     tags=["greek-cc"],
 ) as dag:
@@ -73,17 +71,16 @@ with DAG(
         execution_timeout=timedelta(minutes=10),
     )
     def claim_work() -> list[dict]:
-        """Take a batch of pending parts, seeding the next crawl if the queue is empty.
+        """Take one pending part, seeding the next crawl if the queue is empty.
 
         Returns an empty list (rather than raising AirflowSkipException) when
         there's truly nothing left, so `fetch.expand()` over it cleanly produces
         zero mapped instances instead of forcing a skip-cascade through the
         merge step.
         """
-        batch_size = get_current_context()["params"]["batch_size"]
         conn = _conn()
         try:
-            parts = db.claim_next_parts(conn, batch_size)
+            parts = db.claim_next_parts(conn, 1)
             if parts:
                 return parts
 
@@ -97,7 +94,7 @@ with DAG(
             db.upsert_crawl_resolving(conn, crawl, len(urls))
             db.register_pending_parts(conn, crawl, list(zip(urls, range(len(urls)))))
 
-            return db.claim_next_parts(conn, batch_size)
+            return db.claim_next_parts(conn, 1)
         finally:
             conn.close()
 

@@ -126,7 +126,7 @@ def merge_crawl_manifest(crawl: str, fragment_paths: list[Path], out_dir: Path) 
         pl.concat([pl.scan_parquet(p, hive_partitioning=False) for p in fragment_paths])
         .sort("warc_filename", "warc_record_offset")
         .unique(subset=["content_digest"], keep="first", maintain_order=True)
-        .sink_parquet(output_path, compression="zstd")
+        .sink_parquet(output_path, compression="zstd", engine="streaming")
     )
 
     row_count = pl.scan_parquet(output_path).select(pl.len()).collect().item()
