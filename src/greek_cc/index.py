@@ -14,6 +14,7 @@ See plan_of_action.md §4.3 (index scan) and §4.4 (within-crawl digest dedup).
 import gzip
 import logging
 import os
+import shutil
 import time
 import urllib.request
 from pathlib import Path
@@ -109,25 +110,50 @@ def fetch_part_manifest(
     return fragment_path, len(manifest)
 
 
+SLICE_ROWS = 10_000_000
+
+
+def _sort_dedup_sink(lf: pl.LazyFrame, path: Path) -> None:
+    (
+        lf.sort("warc_filename", "warc_record_offset")
+        .unique(subset=["content_digest"], keep="first", maintain_order=True)
+        .sink_parquet(path, compression="zstd", engine="streaming")
+    )
+
+
 def merge_crawl_manifest(crawl: str, fragment_paths: list[Path], out_dir: Path) -> int:
     """Concatenate fragments, dedup once crawl-wide, write the final manifest.
 
-    sink_parquet (not collect()+write_parquet()) so the merged result streams
-    straight to disk through Polars' out-of-core engine instead of first being
-    fully materialized as one in-memory DataFrame -- the latter is what got
-    this task SIGKILLed on a larger crawl even with 8GB available, since
-    collect(engine="streaming") still holds the *final* result in memory
-    before write_parquet() ever runs, only the intermediate steps stream.
+    Sorting+deduping the whole crawl in one pass is what SIGKILLed this task on
+    a larger crawl even with 8GB available and sink_parquet(engine="streaming")
+    -- a global sort's working set still scales with total row count. Instead,
+    this slices the *unsorted* concat into SLICE_ROWS-row chunks first and
+    sorts+dedupes each chunk on its own (a much smaller working set), then does
+    one more sort+dedup pass over the slices' combined output -- small by then,
+    since each slice already dropped most of its duplicates -- to catch any
+    duplicate that happened to land on opposite sides of a slice boundary.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / f"{crawl}.parquet"
 
-    (
-        pl.concat([pl.scan_parquet(p, hive_partitioning=False) for p in fragment_paths])
-        .sort("warc_filename", "warc_record_offset")
-        .unique(subset=["content_digest"], keep="first", maintain_order=True)
-        .sink_parquet(output_path, compression="zstd", engine="streaming")
-    )
+    base = pl.concat([pl.scan_parquet(p, hive_partitioning=False) for p in fragment_paths])
+    total_rows = base.select(pl.len()).collect().item()
+
+    tmp_dir = out_dir / crawl / "_merge_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        slice_paths = []
+        for i, offset in enumerate(range(0, total_rows, SLICE_ROWS)):
+            slice_path = tmp_dir / f"slice-{i:04d}.parquet"
+            _sort_dedup_sink(base.slice(offset, SLICE_ROWS), slice_path)
+            slice_paths.append(slice_path)
+
+        _sort_dedup_sink(
+            pl.concat([pl.scan_parquet(p, hive_partitioning=False) for p in slice_paths]),
+            output_path,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     row_count = pl.scan_parquet(output_path).select(pl.len()).collect().item()
 
