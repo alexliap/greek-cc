@@ -39,7 +39,7 @@ UI at http://localhost:8080. Secrets live in `.env` (gitignored); see
 
 Extraction (any machine with this repo cloned):
 
-    uv sync
+    uv sync --extra extract
     uv run greek-cc-extract CC-MAIN-2024-22
 
 `fasttext-numpy2-wheel` (GlotLID's backend) builds from source and needs a
