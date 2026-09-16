@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -1061,7 +1061,13 @@ wheels = [
 name = "greek-cc"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
+
+[package.optional-dependencies]
+dag = [
+    { name = "huggingface-hub" },
+    { name = "polars" },
+]
+extract = [
     { name = "boto3" },
     { name = "datatrove" },
     { name = "fasteners" },
@@ -1091,26 +1097,28 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "boto3", specifier = ">=1.34" },
-    { name = "datatrove", specifier = ">=0.10.0" },
-    { name = "fasteners", specifier = ">=0.20" },
-    { name = "fasttext-numpy2-wheel", specifier = ">=0.9.2" },
-    { name = "faust-cchardet", specifier = ">=3.2.0" },
-    { name = "ftfy", specifier = ">=6.3.1" },
-    { name = "huggingface-hub", specifier = ">=1.28.0" },
-    { name = "nltk", specifier = ">=3.10.3" },
-    { name = "polars", specifier = ">=1.43.2" },
-    { name = "pyahocorasick", specifier = ">=2.3.1" },
-    { name = "pyarrow", specifier = ">=25.0.1" },
-    { name = "python-dotenv", specifier = ">=1.0.1" },
-    { name = "python-magic", specifier = ">=0.4.27" },
-    { name = "spacy", specifier = ">=3.8.15" },
-    { name = "tldextract", specifier = ">=5.3.2" },
-    { name = "tokenizers", specifier = ">=0.23.1" },
-    { name = "trafilatura", specifier = ">=2.2.0" },
-    { name = "warcio", specifier = ">=1.8.1" },
-    { name = "xxhash", specifier = "<4" },
+    { name = "boto3", marker = "extra == 'extract'", specifier = ">=1.34" },
+    { name = "datatrove", marker = "extra == 'extract'", specifier = ">=0.10.0" },
+    { name = "fasteners", marker = "extra == 'extract'", specifier = ">=0.20" },
+    { name = "fasttext-numpy2-wheel", marker = "extra == 'extract'", specifier = ">=0.9.2" },
+    { name = "faust-cchardet", marker = "extra == 'extract'", specifier = ">=3.2.0" },
+    { name = "ftfy", marker = "extra == 'extract'", specifier = ">=6.3.1" },
+    { name = "greek-cc", extras = ["dag"], marker = "extra == 'extract'" },
+    { name = "huggingface-hub", marker = "extra == 'dag'", specifier = ">=1.28.0" },
+    { name = "nltk", marker = "extra == 'extract'", specifier = ">=3.10.3" },
+    { name = "polars", marker = "extra == 'dag'", specifier = ">=1.43.2" },
+    { name = "pyahocorasick", marker = "extra == 'extract'", specifier = ">=2.3.1" },
+    { name = "pyarrow", marker = "extra == 'extract'", specifier = ">=25.0.1" },
+    { name = "python-dotenv", marker = "extra == 'extract'", specifier = ">=1.0.1" },
+    { name = "python-magic", marker = "extra == 'extract'", specifier = ">=0.4.27" },
+    { name = "spacy", marker = "extra == 'extract'", specifier = ">=3.8.15" },
+    { name = "tldextract", marker = "extra == 'extract'", specifier = ">=5.3.2" },
+    { name = "tokenizers", marker = "extra == 'extract'", specifier = ">=0.23.1" },
+    { name = "trafilatura", marker = "extra == 'extract'", specifier = ">=2.2.0" },
+    { name = "warcio", marker = "extra == 'extract'", specifier = ">=1.8.1" },
+    { name = "xxhash", marker = "extra == 'extract'", specifier = "<4" },
 ]
+provides-extras = ["dag", "extract"]
 
 [package.metadata.requires-dev]
 dev = [
