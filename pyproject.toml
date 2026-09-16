@@ -20,7 +20,7 @@ dag = [
 ]
 
 # The on-demand `greek-cc-extract` CLI (cli.py -> extract.py, warc_reader.py).
-# Runs outside Airflow -- see README -- so nothing here belongs in the image.
+# Runs outside Airflow - see README - so nothing here belongs in the image.
 extract = [
     "greek-cc[dag]",
     "boto3>=1.34",
