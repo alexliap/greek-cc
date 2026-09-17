@@ -247,6 +247,18 @@ def run_extraction_stage_1_chunk(
     )
     executor.run()
 
+    # a rank's ParquetWriter opens in "wb" mode, so a rank killed mid-write is
+    # cleanly overwritten *if that same rank runs again* -- but changing
+    # `tasks` across restarts of the same chunk (different rank count) leaves
+    # higher-numbered ranks' files orphaned instead, since the new run never
+    # touches them. Left in place, a 0-byte leftover from one of those makes
+    # pl.scan_parquet blow up on every subsequent restart forever, since
+    # nothing else would ever clean it up.
+    for stale in chunk_out.glob("*.parquet"):
+        if stale.stat().st_size == 0:
+            logger.warning("removing stale empty parquet file from an interrupted prior run: %s", stale)
+            stale.unlink()
+
     survivor_files = list(chunk_out.glob("*.parquet"))
     if survivor_files:
         merged = pl.scan_parquet(survivor_files).collect()

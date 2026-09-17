@@ -16,11 +16,13 @@ multiplied together.
 
 import io
 import os
+import random
 import time
 from pathlib import Path
 
 import boto3
 import polars as pl
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from datatrove.data import Document, DocumentsPipeline
 from datatrove.pipeline.readers.base import BaseReader
@@ -33,8 +35,13 @@ S3_BUCKET = "commoncrawl"
 # boto3's own client-level retry config has already been satisfied by a
 # successful initial response -- they need their own explicit retry, or a
 # single transient network hiccup kills the whole chunk over a run that does
-# tens of thousands of these fetches
-FETCH_MAX_ATTEMPTS = 4
+# tens of thousands of these fetches. "adaptive" mode also covers the initial
+# get_object() call itself: with `tasks` workers hammering S3 in parallel,
+# plain per-worker retries stay in lockstep and keep re-triggering the same
+# SlowDown throttling -- adaptive mode adds a client-side rate limiter that
+# backs off across calls, not just within one, and full jitter here on top
+# spreads out the workers that are already mid-retry when it kicks in.
+FETCH_MAX_ATTEMPTS = 6
 FETCH_RETRY_BACKOFF_SECONDS = 2
 
 
@@ -75,6 +82,12 @@ class CCIndexGreekReader(BaseReader):
                 aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
                 aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
                 region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+                # AWS's own recommendation for S3 SlowDown/throttling: adaptive
+                # mode adds a client-side token-bucket rate limiter that backs
+                # off across calls (not just retries within one), instead of
+                # "legacy" mode's fixed small retry count that gave up after
+                # 4 attempts and let SlowDown bubble all the way up.
+                config=Config(retries={"mode": "adaptive", "max_attempts": 8}),
             )
         return self._s3
 
@@ -89,7 +102,12 @@ class CCIndexGreekReader(BaseReader):
             except (BotoCoreError, ClientError) as exc:
                 last_error = exc
                 if attempt < FETCH_MAX_ATTEMPTS - 1:
-                    time.sleep(FETCH_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    # exponential backoff with full jitter -- with `tasks`
+                    # workers retrying independently, fixed linear backoff
+                    # keeps them in lockstep and re-triggers the same
+                    # throttling on the next round
+                    base = FETCH_RETRY_BACKOFF_SECONDS * (2**attempt)
+                    time.sleep(random.uniform(0, base))
         raise last_error
 
     def _fetch_row(self, row: dict) -> Document | None:
