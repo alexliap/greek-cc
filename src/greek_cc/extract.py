@@ -34,6 +34,7 @@ location/shape as before this split.
 
 import logging
 import os
+import shutil
 from functools import partial
 from pathlib import Path
 
@@ -66,7 +67,7 @@ from datatrove.pipeline.formatters import (
 from datatrove.pipeline.readers.parquet import ParquetReader
 from datatrove.pipeline.writers.parquet import ParquetWriter
 from datatrove.utils.hashing import HashConfig
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
 
 from greek_cc.warc_reader import CCIndexGreekReader
 
@@ -411,6 +412,37 @@ def run_extraction_stage_2_dedup_and_write(
         "row_count_out": row_count_out,
         "row_count_removed": row_count_removed,
     }
+
+
+def list_published_chunks(crawl: str) -> set[int]:
+    """Offsets of stage-1 chunks already uploaded to HF_DATASET_REPO under raw/<crawl>/."""
+    repo_id = os.environ.get("HF_DATASET_REPO")
+    if not repo_id:
+        raise RuntimeError("HF_DATASET_REPO is not set -- cannot list published chunks")
+    prefix = f"raw/{crawl}/chunk_"
+    offsets = set()
+    for path in HfApi().list_repo_files(repo_id, repo_type="dataset"):
+        if path.startswith(prefix) and path.endswith(".parquet"):
+            offsets.add(int(path[len(prefix) : -len(".parquet")]))
+    return offsets
+
+
+def fetch_published_chunk(crawl: str, stage_1_dir: Path, offset: int) -> None:
+    """Download one published chunk into the local stage-1 layout stage 2 reads."""
+    chunk_out = _stage_1_chunk_dir(stage_1_dir, crawl, offset)
+    target = chunk_out / f"chunk_{offset:012d}.parquet"
+    if target.exists() and target.stat().st_size > 0:
+        return
+    hf_hub_download(
+        repo_id=os.environ["HF_DATASET_REPO"],
+        repo_type="dataset",
+        filename=f"raw/{crawl}/{target.name}",
+        local_dir=chunk_out / "_dl",
+    )
+    downloaded = chunk_out / "_dl" / "raw" / crawl / target.name
+    chunk_out.mkdir(parents=True, exist_ok=True)
+    downloaded.replace(target)
+    shutil.rmtree(chunk_out / "_dl", ignore_errors=True)
 
 
 def _publish(local_dir: Path, repo_path_prefix: str) -> None:

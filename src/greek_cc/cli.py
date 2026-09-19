@@ -54,6 +54,15 @@ def main() -> None:
             "single-task, per datatrove's own MinhashDedupCluster API."
         ),
     )
+    parser.add_argument(
+        "--skip-published",
+        action="store_true",
+        help=(
+            "Skip chunks already uploaded to HF_DATASET_REPO under raw/<crawl>/, "
+            "downloading them into the local stage-1 layout so stage 2 dedup "
+            "still sees every chunk"
+        ),
+    )
     args = parser.parse_args()
 
     crawl_out = args.out_dir / args.crawl
@@ -68,7 +77,14 @@ def main() -> None:
     chunks = extract.compute_chunk_bounds(manifest_path, args.chunk_size)
     logger.info("%s: %d chunk(s) of up to %d rows", args.crawl, len(chunks), args.chunk_size)
 
+    published = extract.list_published_chunks(args.crawl) if args.skip_published else set()
+    if published:
+        logger.info("%s: %d chunk(s) already published, skipping", args.crawl, len(published))
+
     for i, chunk in enumerate(chunks, 1):
+        if chunk["offset"] in published:
+            extract.fetch_published_chunk(args.crawl, args.out_dir, chunk["offset"])
+            continue
         logger.info(
             "%s: stage 1 chunk %d/%d (offset=%d length=%d)",
             args.crawl, i, len(chunks), chunk["offset"], chunk["length"],
