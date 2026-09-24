@@ -34,6 +34,7 @@ location/shape as before this split.
 
 import logging
 import os
+import re
 import shutil
 from functools import partial
 from pathlib import Path
@@ -258,6 +259,17 @@ def run_extraction_stage_1_chunk(
     for stale in chunk_out.glob("*.parquet"):
         if stale.stat().st_size == 0:
             logger.warning("removing stale empty parquet file from an interrupted prior run: %s", stale)
+            stale.unlink()
+
+    # same restart-with-fewer-tasks hazard, non-empty variant: ranks >= tasks
+    # left behind by an earlier run with a larger `tasks` hold rows from a
+    # different sharding of the slice (so merging them would duplicate docs,
+    # and one killed mid-write has no parquet footer at all, which is what
+    # blew up pl.scan_parquet below). Ranks < tasks fully cover the slice.
+    for stale in chunk_out.glob("*.parquet"):
+        rank = re.fullmatch(r"\d+_(\d+)", stale.stem)
+        if rank and int(rank.group(1)) >= tasks:
+            logger.warning("removing orphaned rank %s parquet from a prior run with more tasks: %s", rank.group(1), stale)
             stale.unlink()
 
     survivor_files = list(chunk_out.glob("*.parquet"))
