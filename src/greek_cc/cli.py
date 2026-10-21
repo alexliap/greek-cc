@@ -74,17 +74,20 @@ def main() -> None:
     if not manifest_path.exists():
         manifest_path = index.download_manifest(args.crawl, args.manifests_dir)
 
-    chunks = extract.compute_chunk_bounds(manifest_path, args.chunk_size)
+    published = extract.list_published_chunks(args.crawl) if args.skip_published else set()
+    resume_at = extract.published_prefix_end(published)
+    if published:
+        logger.info(
+            "%s: %d chunk(s) already published (rows 0-%d), skipping",
+            args.crawl, len(published), resume_at,
+        )
+        for offset in sorted(published):
+            extract.fetch_published_chunk(args.crawl, args.out_dir, offset)
+
+    chunks = extract.compute_chunk_bounds(manifest_path, args.chunk_size, start=resume_at)
     logger.info("%s: %d chunk(s) of up to %d rows", args.crawl, len(chunks), args.chunk_size)
 
-    published = extract.list_published_chunks(args.crawl) if args.skip_published else set()
-    if published:
-        logger.info("%s: %d chunk(s) already published, skipping", args.crawl, len(published))
-
     for i, chunk in enumerate(chunks, 1):
-        if chunk["offset"] in published:
-            extract.fetch_published_chunk(args.crawl, args.out_dir, chunk["offset"])
-            continue
         logger.info(
             "%s: stage 1 chunk %d/%d (offset=%d length=%d)",
             args.crawl, i, len(chunks), chunk["offset"], chunk["length"],

@@ -138,8 +138,8 @@ def _stage_1_chunk_dir(stage_1_dir: Path, crawl: str, offset: int) -> Path:
     return Path(stage_1_dir) / "_stage_1" / crawl / f"chunk_{offset:012d}"
 
 
-def compute_chunk_bounds(manifest_path: Path, chunk_size: int) -> list[dict]:
-    """Split a manifest's row range into bounded (offset, length) chunks.
+def compute_chunk_bounds(manifest_path: Path, chunk_size: int, start: int = 0) -> list[dict]:
+    """Split a manifest's row range (from `start` on) into bounded (offset, length) chunks.
 
     A metadata-only read (row count from the Parquet footer), not a
     materialization -- safe to call regardless of manifest size.
@@ -147,8 +147,27 @@ def compute_chunk_bounds(manifest_path: Path, chunk_size: int) -> list[dict]:
     total_rows = pl.scan_parquet(manifest_path).select(pl.len()).collect().item()
     return [
         {"offset": offset, "length": min(chunk_size, total_rows - offset)}
-        for offset in range(0, total_rows, chunk_size)
+        for offset in range(start, total_rows, chunk_size)
     ]
+
+
+def published_prefix_end(published: set[int]) -> int:
+    """Manifest row where already-published chunks end.
+
+    Published chunks may have been cut with a different --chunk-size than the
+    current run, so their step is inferred from the offsets themselves. They
+    must form a contiguous, evenly spaced run from 0 -- anything else can't be
+    resumed safely.
+    """
+    if not published:
+        return 0
+    offsets = sorted(published)
+    if len(offsets) == 1:
+        raise RuntimeError("only one published chunk -- can't infer its chunk size")
+    step = offsets[1] - offsets[0]
+    if offsets != list(range(0, offsets[-1] + 1, step)):
+        raise RuntimeError(f"published chunks aren't contiguous {step}-row steps from 0: {offsets}")
+    return offsets[-1] + step
 
 
 def run_extraction_stage_1_chunk(
